@@ -25,10 +25,10 @@
          and so is `quarkus-maven-plugin`: nothing here is packaged as an application, and
          `quarkus-junit5` augments from the classpath at test time without it. -->
     <groupId>eu.wohlben.qits</groupId>
-    <artifactId>qits-eventsourcing</artifactId>
+    <artifactId>qits-eventstream</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
-    <name>qits-eventsourcing</name>
+    <name>qits-eventstream</name>
 
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
