@@ -26,7 +26,7 @@
          `quarkus-junit5` augments from the classpath at test time without it. -->
     <groupId>eu.wohlben.qits</groupId>
     <artifactId>qits-eventstream</artifactId>
-    <version>1.0.0</version>
+    <version>2026.802.154015</version>
     <packaging>jar</packaging>
     <name>qits-eventstream</name>
 
