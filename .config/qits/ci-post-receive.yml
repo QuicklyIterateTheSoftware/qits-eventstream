@@ -1,0 +1,6 @@
+steps:
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      set -eu
+      ./mvnw -B -ntp verify

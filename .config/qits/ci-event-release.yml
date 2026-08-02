@@ -1,0 +1,19 @@
+event: SCMRelease
+when:
+  - repository: { exact: qits-eventstream }
+artifacts:
+  - { type: maven, name: "eu.wohlben.qits:qits-eventstream" }
+steps:
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      set -eu
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+      if curl -fsS -o /dev/null "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-eventstream/$version/qits-eventstream-$version.pom"; then
+        echo "qits-eventstream@$version is already published — skipping"
+        exit 0
+      fi
+      ./mvnw -B -ntp deploy -DskipTests \
+        -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"
