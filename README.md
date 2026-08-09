@@ -153,27 +153,36 @@ in the consuming application's `application.properties`, exactly where it goes f
 `publish()` is a debug log, the sweeper does nothing and the subscriber never dials. There is no
 half-enabled state.
 
-### The database, and the one variable a deployment must set
+### The database, and the resource a deployment must declare
 
 This jar owns its **own** named datasource, persistence unit and Flyway lineage — `eventstream`,
 migrations at `db/eventstream/migration` — and never shares the consuming service's database or its
-migration history.
+migration history. **The store is PostgreSQL**, reached through the platform's generic resource
+contract:
 
-    quarkus.datasource.eventstream.jdbc.url=jdbc:h2:file:${user.home}/.qits/data/eventstream/h2/eventstream
+    quarkus.datasource.eventstream.db-kind=postgresql
+    quarkus.datasource.eventstream.jdbc.url=${QITS_RESOURCE_EVENTSTREAM_URL}
+    quarkus.datasource.eventstream.username=${QITS_RESOURCE_EVENTSTREAM_USERNAME}
+    quarkus.datasource.eventstream.password=${QITS_RESOURCE_EVENTSTREAM_PASSWORD}
+
+**Adding this jar to a deployable adds one line to its deployment spec.** The consuming repository
+declares the resource in `.config/qits/deployments.yml` —
+
+    resources: postgresql:eventstream:<database>
+
+— and qits-deployments creates the role and the database before the cutover, then injects those
+three variables into the container. **The resource must be named `eventstream`**: the variable names
+follow the name, so a spec that calls it anything else leaves this jar's expressions unresolved.
+
+**The triple has no defaults, and that is the refuse-to-boot stance.** An unset variable is an
+unresolvable expression, so the process dies at Flyway naming what is missing rather than opening
+some fallback store nobody meant. There is no local file to fall back to any more — which retires
+the `${user.home}` default that once cost a rollout, since a container with no `HOME` resolved it to
+`?` and only the packaged artifact in its real environment ever found out.
 
 **`enabled=false` does not stop the datasource.** Quarkus opens the connection and runs Flyway at
-boot regardless. Two things follow, and neither is theoretical:
-
-- **A consuming test suite must point that datasource at in-memory H2**, or two builds on one host
-  race for a real `~/.qits/data/eventstream` and its single-writer file.
-- **A deployment must set `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL`** to a path on its data volume.
-  Mandatory, not advisory: the shipped default interpolates `${user.home}`, and in a container with
-  no `HOME` a native binary resolves that to `?`, which H2 rejects rather than falling back. The
-  process then dies at Flyway before serving anything — `Failed to start quarkus` /
-  `FlywaySqlUnableToConnectToDbException`. It fails loudly and safely, but it fails.
-
-The URL carries **no `AUTO_SERVER`**: that asks H2 to start its own TCP server, whose classes are
-not in a native image, and the binary dies at boot on a default no JVM test ever exercises.
+boot regardless, so a consuming **test suite** must point `quarkus.datasource.eventstream` at a
+database of its own — the resource variables are a deployment fact and a suite has none.
 
 ## What is on the wire
 
@@ -219,8 +228,9 @@ inline attempt failing and the row committing loses the event.
 **A clone of this repo alone builds and tests green** — no monorepo, no docker, no credentials, no
 prior `mvn install` anywhere. That is the gate, and it is the reason this pom duplicates versions
 instead of inheriting them. The suite starts its own stub qits-events on a JDK `HttpServer` and runs
-the outbox on in-memory H2, so nothing is skipped for want of infrastructure. 76 tests, about twelve
-seconds.
+the outbox on a **real postgres it spawns itself** — zonky's binaries, resolved as ordinary Maven
+artifacts and started as a child process, never a container — so nothing is skipped for want of
+infrastructure. 76 tests, about fifteen seconds.
 
 `.sdkmanrc` names `25.0.2-graalce`. The jar compiles into a consumer's GraalVM native image, but
 **the consumer owns the reflection registration** — read AGENTS.md's section on it before shipping a

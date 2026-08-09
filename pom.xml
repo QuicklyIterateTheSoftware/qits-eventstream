@@ -18,7 +18,8 @@
          qits-ci's own pom gives: A CLONE OF THIS REPO ALONE MUST BUILD, with no monorepo, no
          parent to inherit from, and no prior `mvn install` anywhere. `./mvnw verify` is the gate,
          and the suite is self-contained enough to meet it — the stub qits-events is a JDK
-         `HttpServer` the tests start themselves, and the outbox runs on in-memory H2.
+         `HttpServer` the tests start themselves, and the outbox runs on a postgres the suite spawns
+         itself from Maven artifacts (zonky), never a container.
 
          Trimmed to what one library module actually needs. The monorepo's app-wide machinery is
          intentionally absent (spotless, enforcer, surefire chunking, the build-cache extension),
@@ -39,6 +40,20 @@
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
         <quarkus.platform.version>3.34.6</quarkus.platform.version>
 
+        <!-- Embedded PostgreSQL for the suite. The outbox's store IS postgres now, so every test
+             that boots the persistence unit runs against one — and the first rule here is that a
+             clone tests green with NO DOCKER, which rules out Testcontainers and Quarkus dev
+             services alike. Zonky resolves real postgres binaries as ordinary Maven artifacts and
+             spawns them as a child process: a dependency, not a container.
+
+             Two coordinates, on purpose. The BOM pins which POSTGRES the binaries are (18.4.0 — the
+             platform's own postgres tag), the library version is the harness around them, and they
+             move independently. Every architecture the suite may run on is named explicitly below:
+             the binaries are per-arch artifacts, and a missing one fails in the middle of a suite
+             rather than during resolution. -->
+        <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
+        <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
+
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <jandex-plugin.version>3.4.0</jandex-plugin.version>
@@ -56,6 +71,23 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <dependency>
+                <!-- Which postgres the embedded binaries ARE — 18.4.0, the tag the platform's own
+                     qits-oci-postgresql image is built from, so the suite proves the lineage
+                     against the engine it ships on. Imported as a BOM because the per-arch
+                     artifacts below are separate coordinates. -->
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${zonky.postgres-binaries.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.zonky.test</groupId>
+                <artifactId>embedded-postgres</artifactId>
+                <version>${zonky.embedded-postgres.version}</version>
+                <scope>test</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
@@ -71,12 +103,24 @@
             <artifactId>quarkus-hibernate-orm-panache</artifactId>
         </dependency>
         <dependency>
+            <!-- The outbox's store. It was a file H2 until the platform grew resource
+                 provisioning; the datasource is now the generic `QITS_RESOURCE_EVENTSTREAM_*`
+                 contract, and a consumer's deployment declares `postgresql:eventstream` to have it
+                 filled in. See src/main/resources/META-INF/microprofile-config.properties. -->
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-jdbc-h2</artifactId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-flyway</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Flyway 10 split its database support out of the core: without this module Flyway
+                 refuses a postgres url with "no database found to handle". It sits in this jar
+                 because this jar owns the lineage — a consumer that did not carry it would fail at
+                 boot on a migration it does not own. -->
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
         <dependency>
             <!-- Jackson itself, NOT the CDI ObjectMapper. CanonicalJson builds its own mapper and
@@ -112,6 +156,35 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The store every @QuarkusTest here boots against. Zonky spawns real postgres
+                 binaries as a child process — a maven dependency rather than a container — which
+                 is what keeps the clone-alone, docker-free rule true now that the outbox's store
+                 is postgres. EmbeddedPg + EmbeddedPgConfigSource hand the running instance to
+                 Quarkus. -->
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- Named per architecture on purpose: the binaries are separate artifacts and zonky
+                 picks one at run time, so an unnamed arch fails in the middle of a suite rather
+                 than during resolution. These three are what this platform is built and developed
+                 on. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-arm64v8</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

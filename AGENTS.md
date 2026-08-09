@@ -16,6 +16,15 @@ own stub qits-events (`StubEventsServer`, a JDK `HttpServer` and a `websockets-n
 it) rather than needing a real one. There are no integration tests and no `skipITs` property: the
 whole suite is surefire, and there is nothing here that only real infrastructure could exercise.
 
+**The store being PostgreSQL does not change that answer.** `testdb/EmbeddedPg` starts **zonky's**
+postgres — real binaries resolved as ordinary Maven artifacts, spawned as a child process — and
+`testdb/EmbeddedPgConfigSource` hands its url, username and password to every `@QuarkusTest` at an
+ordinal above `application.properties`, because the port is chosen at run time and cannot be written
+into a file. The instance is tracked in a **system property** as well as a static field: a Quarkus
+run loads config sources in more than one classloader, and the property is the one thing those
+copies share. Testcontainers is not on this classpath and must not arrive; `quarkus.devservices.enabled=false`
+says the same thing about the other way a container gets started.
+
 **This is a library, so there is one maven module at the root and no `service/` split.** The repo
 produces one jar. The pom is the parent and the module at once.
 
@@ -30,6 +39,9 @@ produces one jar. The pom is the parent and the module at once.
   `EventEnvelope` and `EventFrame`. `EventFrame` is public because a raw listener receives it.
 - `entity/`, `persistence/` — the outbox row and its Panache repository, in this jar's own named
   persistence unit.
+- `testdb/` (test sources only) — `EmbeddedPg` and `EmbeddedPgConfigSource`, the embedded postgres
+  the suite runs the outbox against. It is under this library's package like everything else here,
+  because the extraction rule admits no other.
 
 **THE EXTRACTION RULE, which outlived the extraction.** No `eu.wohlben.qits.*` package other than
 this one may appear in these sources, main or test. It was written inside qits-ci to keep lifting
@@ -123,6 +135,39 @@ review. Its javadoc argues the widening.
   out of `onEvent` does, because the caller is still a socket callback. **Causation is identical
   too**: both paths run inside the *same single* `CausationScope` of the arriving frame's id.
 
+## The store, and the lineage that restarted at V1
+
+**The outbox runs on PostgreSQL, reached through the platform's generic resource contract.** The
+three keys in `META-INF/microprofile-config.properties` are expressions over
+`QITS_RESOURCE_EVENTSTREAM_URL` / `_USERNAME` / `_PASSWORD` with **no defaults**: a consumer declares
+`resources: postgresql:eventstream:<database>` in its deployment spec, qits-deployments provisions
+the role and the database before the cutover and injects the triple, and an unset variable dies at
+Flyway naming itself instead of opening a store nobody meant. Nothing in the deployer is
+eventstream-specific — mapping the generic variables is the *application's* job, and this jar is the
+application for its own datasource.
+
+**The H2 lineage (V1 + V2) was deleted rather than continued**, and one fact is what allowed it:
+this table is empty in a healthy process. A publish that lands inline writes nothing and a row
+delivered on retry is deleted, so the most an H2 file could have held at the moment of the move is a
+few undelivered events — and the move is a re-bootstrap, which is where those go anyway. No postgres
+database ever ran the H2 files, so no `V3__move_to_postgres.sql` had a reader. The fresh `V1__init.sql`
+is those two migrations translated and merged: `text` instead of `clob`, and V2's `parent_id` folded
+into the table with **no backfill**, since every database reaching it is empty. **A clean start is
+not a precedent** — the ordinary rule (append, never edit an applied migration) is back from V1
+onward.
+
+Two translation notes worth keeping:
+
+- **`@Lob` is gone from `OutboxEvent`, replaced by `@Column(columnDefinition = "text")`.** On H2 the
+  two agreed — `@Lob String` was a `clob` and the column was one. On PostgreSQL `@Lob` means a
+  *large object*: Hibernate binds an oid and the insert fails against a `text` column. This is the
+  only entity mapping the move had to change, and `OutboxFlowTest` asserts the payload round trip,
+  so it is proved rather than reasoned.
+- **The `check (status in …)` survives the translation**, where qits-platform-deployments dropped its
+  enum checks. That was a defect answer, not a design one — H2 2.4.240 tied a compiled IN-set to its
+  session and failed a valid insert with 23514 — and postgres has no such behaviour. Two values that
+  the sweeper's own logic closes over are an invariant, not a catalogue that grows.
+
 ## What a consumer has to do, and what it must not forget
 
 Registering a listener really is "add a bean" — no channel name, no annotation — and no
@@ -142,19 +187,22 @@ Beyond that there are three facts a consumer gets wrong once each.
   change.
 - **Dark does not mean absent.** `enabled=false` stops publishing, sweeping and dialling; it does
   not stop the datasource. Quarkus opens the connection and runs Flyway at boot regardless, so a
-  consumer's `src/test/resources/application.properties` must point `quarkus.datasource.eventstream`
-  at in-memory H2 — measured, not assumed: without those lines a suite creates and migrates a real
-  `~/.qits/data/eventstream`, and two builds on one host race for its single-writer file.
+  consumer's `src/test/resources/application.properties` must give `quarkus.datasource.eventstream`
+  a database of its own — the resource variables below are a deployment fact and a suite has none.
+  Measured, not assumed: this rule was bought when a suite without those lines migrated a real
+  store and two builds on one host raced for it.
 
-  **The deployment side of the same sentence cost a rollout: adding this jar to a deployable adds a
-  MANDATORY deployment variable.** `QUARKUS_DATASOURCE_EVENTSTREAM_JDBC_URL` must point at the data
-  volume. The shipped default interpolates `${user.home}`, which is the platform's convention and
-  right for a host-run process — but in a container with no `HOME` the native binary resolves it to
-  `?`, and H2 rejects a path implicitly relative to the working directory rather than falling back
-  to one. The process dies at Flyway before serving anything: `Failed to start quarkus` /
-  `FlywaySqlUnableToConnectToDbException`. **A config default no JVM test exercises, failing only in
-  the packaged artifact in its real environment.** It fails loudly and safely — a health gate keeps
-  the previous container — but it fails.
+  **The deployment side of the same sentence cost a rollout, and the fix is now structural: adding
+  this jar to a deployable adds a MANDATORY `resources:` line to its deployment spec.**
+  `resources: postgresql:eventstream:<database>` in `.config/qits/deployments.yml` is what makes
+  qits-deployments create the role and the database and inject
+  `QITS_RESOURCE_EVENTSTREAM_URL` / `_USERNAME` / `_PASSWORD`. **The resource must be named
+  `eventstream`** — the variable names follow the name, so any other spelling leaves this jar's
+  expressions unresolved. The old failure was a shipped `${user.home}` default that a container with
+  no `HOME` resolved to `?`: **a config default no JVM test exercises, failing only in the packaged
+  artifact in its real environment.** The triple that replaced it has no default at all, which is
+  what makes that class of bug unreachable — there is no fallback with a feature in it to lose, and
+  a missing variable dies at Flyway naming itself.
 - **The reflection registration is the consumer's, and it is the one that fails quietly.** A
   deployable that native-image-compiles must carry a `@RegisterForReflection` naming its own event
   classes, `EventEnvelope`, `EventFrame` **and** `CanonicalJson$QitsEventMixin` (by string name; it
@@ -199,8 +247,13 @@ add it here.
 
 ## The suite
 
-76 tests, all surefire, about twelve seconds. Three conventions in
-`src/test/resources/application.properties` are load-bearing:
+76 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
+The database is `eventstream_test` on that instance, named for this repository rather than for a
+module so a consumer's suite spawning its own postgres on the same host cannot mean the same one.
+`clean-at-start` wipes the schema between Quarkus restarts, which is what keeps a suite sharing one
+database across classes reproducible.
+
+Three conventions in `src/test/resources/application.properties` are load-bearing:
 
 - **`quarkus.http.test-port=0`.** This module registers no route of its own — `websockets-next` is
   here for its CLIENT — but the extension brings an HTTP server along and a `@QuarkusTest` starts

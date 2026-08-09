@@ -6,7 +6,6 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import java.time.Instant;
 import org.hibernate.annotations.CreationTimestamp;
@@ -40,11 +39,20 @@ public class OutboxEvent extends PanacheEntityBase {
   @Column(name = "occurred_at", nullable = false)
   public Instant occurredAt;
 
-  /** The canonical JSON produced at publish time, stored exactly as it will be re-sent. */
-  @Lob public String payload;
+  /**
+   * The canonical JSON produced at publish time, stored exactly as it will be re-sent.
+   *
+   * <p><b>{@code text}, and NOT {@code @Lob}.</b> On H2 the two agreed — a {@code @Lob String} was a
+   * {@code clob} and the column was one. On PostgreSQL {@code @Lob} means a <em>large object</em>:
+   * Hibernate binds an oid, and the insert fails against the {@code text} column V1 creates. This is
+   * the one entity mapping the move off H2 had to change.
+   */
+  @Column(columnDefinition = "text")
+  public String payload;
 
   /** The envelope's {@code description}. Always null today; the column exists so a row is the whole envelope. */
-  @Lob public String description;
+  @Column(columnDefinition = "text")
+  public String description;
 
   /**
    * The envelope's {@code parentId} — the event that caused this one, or null for a root.
