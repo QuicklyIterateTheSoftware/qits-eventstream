@@ -23,7 +23,7 @@ config defaults and its own database.
 
 ## The whole public surface
 
-Six types. Everything else in here is how they are kept.
+Ten types. Everything else in here is how they are kept.
 
 | | |
 |---|---|
@@ -33,6 +33,13 @@ Six types. Everything else in here is how they are kept.
 | `QitsRawEventListener` | consume frames for names chosen at runtime. |
 | `QitsDurableEventListener` | consume **exactly once**, catching up on what the stream missed. |
 | `CausationScope` | the ambient cause, for carrying an edge across a thread. |
+| `CausationHeader` | the same cause on the wire — `X-Qits-Causation-Id`, for carrying an edge across a service. |
+| `CausedRow` | the same cause in a table: an entity whose rows record the event they were written because of. |
+| `CausationStamp` | the JPA entity listener that fills a `CausedRow` at persist. |
+| `@Uncaused` | the written opt-out, read by the qits-arch-rules suite and by nobody at runtime. |
+
+Two `@Provider` filters, `CausationClientFilter` and `CausationServerFilter`, apply the header
+automatically; nobody names them, so they are not in the table.
 
 ### Publishing
 
@@ -171,6 +178,66 @@ anything.**
 `CausationScope.with(null, …)` is the deliberate detach — a statement about a region, as against
 `publish(e, null)`, which only means "I have no argument to pass". The asymmetry is settled.
 
+#### Across a service boundary
+
+A chain does not end at a REST call. Two `@Provider` filters carry the scope over HTTP as the
+`X-Qits-Causation-Id` header (`CausationHeader.NAME`), and a consumer registers nothing:
+
+- `CausationClientFilter` — every REST-client request sent inside a scope carries the header. A
+  header the caller set itself wins, mirroring `publish(event, parentEventId)`.
+- `CausationServerFilter` — a request carrying the header runs its resource method inside
+  `CausationScope` of that id, and the worker thread is left as it was found. Absent and malformed
+  read as "no cause"; causation is advisory and never fails a request.
+
+So event 1 in service A triggering a REST call whose handler in service B publishes event 2 records
+`1 → 2` with neither service passing anything. The header name sits in the gateway's reserved
+`X-Qits-*` namespace, so an outside caller cannot forge a cause: qits-gateway strips the prefix at
+the edge, and service-to-service traffic never passes the gateway.
+
+The filters need the REST server or client to exist — a consumer without them never instantiates
+either — and they ride the request thread. A blocking resource method (the platform's shape) sees
+the scope; an async method whose continuation migrates threads inherits the executor caveat above.
+A caller building requests by hand stamps the header itself:
+
+```java
+UUID cause = CausationScope.current();
+if (cause != null) request.header(CausationHeader.NAME, cause.toString());
+```
+
+#### Into the rows
+
+A row written while a cause is ambient can record it, so tracing walks from a table back into the
+chain — the persistence spelling of the same scope. Participation is per entity:
+
+```java
+@Entity
+@EntityListeners(CausationStamp.class)
+public class WorkspaceRow extends PanacheEntity implements CausedRow {
+
+  @Column(name = "causation_id")
+  public UUID causationId;
+
+  @Override public UUID causationId() { return causationId; }
+  @Override public void causationId(UUID id) { this.causationId = id; }
+}
+```
+
+The service owns the migration that adds the nullable column, exactly as it owns its table.
+`@PrePersist` fires when `persist()` is called, **on the calling thread** — not later at flush — so
+the scope a request filter or the dispatcher established is still standing when the stamp reads it.
+The familiar rules apply unchanged: a value the author set wins; outside any scope the column stays
+null (a rootless row); and the stamp is **insert-only** — the column answers "which event caused
+this row to exist", and updates do not rewrite creation history. The column can never be a foreign
+key: the event it names lives in qits-events' store.
+
+An interface plus a listener rather than a mapped superclass, because entities have spent their
+single inheritance already — on `PanacheEntity` or a base of their own.
+
+Nothing here warns about an entity that forgot to participate. That is the qits-arch-rules suite's
+job (in qits-integrations-quarkus): its rules require every `@Entity` to either implement
+`CausedRow` or carry `@Uncaused`, so forgetting fails a build and opting out is one reviewable
+line.
+
 ## Configuration
 
 Shipped as `META-INF/microprofile-config.properties` at **ordinal 100**, so the consuming
@@ -300,7 +367,7 @@ prior `mvn install` anywhere. That is the gate, and it is the reason this pom du
 instead of inheriting them. The suite starts its own stub qits-events on a Vert.x server and runs
 the two stores on a **real postgres it spawns itself** — zonky's binaries, resolved as ordinary Maven
 artifacts and started as a child process, never a container — so nothing is skipped for want of
-infrastructure. 103 tests, about fifteen seconds.
+infrastructure. 115 tests, about fifteen seconds.
 
 `.sdkmanrc` names `25.0.2-graalce`. The jar compiles into a consumer's GraalVM native image, but
 **the consumer owns the reflection registration** — read AGENTS.md's section on it before shipping a
