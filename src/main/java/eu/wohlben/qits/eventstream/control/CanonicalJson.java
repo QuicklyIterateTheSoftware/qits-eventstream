@@ -139,6 +139,19 @@ public final class CanonicalJson {
     }
   }
 
+  /**
+   * Reads one page of {@code GET /events/api/events} — the catch-up sweep's half of the same
+   * contract {@link #frame} reads live. Unknown fields are ignored here too, which is what lets the
+   * log's rows carry timestamps this side has no use for.
+   */
+  static EventPage page(String text) {
+    try {
+      return MAPPER.readValue(text, EventPage.class);
+    } catch (Exception e) {
+      throw new IllegalArgumentException("not a page of events: " + e, e);
+    }
+  }
+
   /** Parses arbitrary JSON — the tests' way of asserting on shape without hand-rolling a parser. */
   public static JsonNode parse(String json) {
     try {

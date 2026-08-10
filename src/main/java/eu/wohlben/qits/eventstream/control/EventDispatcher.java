@@ -2,6 +2,7 @@ package eu.wohlben.qits.eventstream.control;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import eu.wohlben.qits.eventstream.CausationScope;
+import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.QitsEvent;
 import eu.wohlben.qits.eventstream.QitsEventListener;
 import eu.wohlben.qits.eventstream.QitsRawEventListener;
@@ -18,11 +19,12 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.jboss.logging.Logger;
 
 /**
- * The registry of listener beans — {@link QitsEventListener} and {@link QitsRawEventListener} — and
- * the routing of one arriving frame to them.
+ * The registry of listener beans — {@link QitsEventListener}, {@link QitsRawEventListener} and
+ * {@link QitsDurableEventListener} — and the routing of one arriving frame to them.
  *
  * <p>Two jobs that are really one: the set of signatures to subscribe to and what dispatch will
  * route are the <em>same</em> derivation from the same beans, so a listener cannot be subscribed for
@@ -50,7 +52,7 @@ import org.jboss.logging.Logger;
  * {@code ["*"]}</b>: once one consumer wants everything, narrowing the wire buys nothing, and the
  * extra frames are dropped here at no cost to anyone else.
  *
- * <h2>Dispatch order: typed first, raw second</h2>
+ * <h2>Dispatch order: typed, raw, durable</h2>
  *
  * <p>Stated because it is a contract rather than an accident. Typed dispatch is the path that
  * already existed and its consumers are the domain handlers for a specific event; the raw seam is
@@ -59,6 +61,14 @@ import org.jboss.logging.Logger;
  * listener — when it is called relative to the frame's arrival. Both paths run for a frame both want,
  * each listener gets it once, and a throw anywhere in either is contained, so neither path can
  * shorten the other.
+ *
+ * <p><b>Durable listeners are last, and they are the only path that touches a database.</b> Their
+ * arrival goes through {@link DurableFunnel} rather than straight to the bean — one transaction that
+ * claims the event and calls the handler — so a live frame and a caught-up row are the same code
+ * path and the effect is exactly-once per (listener, event). This class stays the only place that
+ * knows which beans exist: {@link CatchupSweeper} reads the durable ones from here rather than
+ * collecting its own, because two registries that disagree would mean a listener subscribed for live
+ * and never caught up, or the reverse.
  */
 @ApplicationScoped
 public class EventDispatcher {
@@ -69,11 +79,18 @@ public class EventDispatcher {
 
   @Inject @Any Instance<QitsRawEventListener> rawListenerBeans;
 
+  @Inject @Any Instance<QitsDurableEventListener> durableListenerBeans;
+
+  @Inject DurableFunnel funnel;
+
   /** Signature → the listeners wanting it. Sorted, so the subscribe frame is stable across boots. */
   private final Map<String, List<QitsEventListener<?>>> bySignature = new TreeMap<>();
 
   /** Every raw listener bean. Which ones want a given frame is asked of them, per frame. */
   private final List<QitsRawEventListener> rawListeners = new ArrayList<>();
+
+  /** Every durable listener bean. Asked per frame like the raw ones, and swept by {@link CatchupSweeper}. */
+  private final List<QitsDurableEventListener> durableListeners = new ArrayList<>();
 
   @PostConstruct
   void index() {
@@ -86,21 +103,45 @@ public class EventDispatcher {
     for (QitsRawEventListener raw : rawListenerBeans) {
       rawListeners.add(raw);
     }
+    for (QitsDurableEventListener durable : durableListenerBeans) {
+      durableListeners.add(durable);
+    }
     if (!bySignature.isEmpty()) {
       LOG.debugf("event listeners registered for %s", bySignature.keySet());
     }
     if (!rawListeners.isEmpty()) {
       LOG.debugf("%d raw event listeners registered", rawListeners.size());
     }
+    if (!durableListeners.isEmpty()) {
+      LOG.debugf("%d durable event listeners registered", durableListeners.size());
+    }
+  }
+
+  /**
+   * Every durable listener bean, in bean order — the registry {@link CatchupSweeper} sweeps.
+   *
+   * <p>Here rather than in the sweeper so that the beans a frame is routed to and the beans that get
+   * caught up are one list. Two derivations could disagree, and the way they would disagree is a
+   * listener that receives live frames and is never caught up, which is the exact failure this whole
+   * seam exists to remove.
+   */
+  public List<QitsDurableEventListener> durableListeners() {
+    return List.copyOf(durableListeners);
   }
 
   /**
    * What to put in the subscribe frame, in a stable order: the union of the typed signatures and
-   * whatever the raw listeners currently want, collapsed to {@code ["*"]} if any of them wants
-   * everything. Empty means there is no reason to open a stream at all.
+   * whatever the raw and durable listeners currently want, collapsed to {@code ["*"]} if any of them
+   * wants everything. Empty means there is no reason to open a stream at all.
+   *
+   * <p>A durable listener is in the union like any other. Catch-up is a floor under delivery, not a
+   * replacement for it: a durable consumer that only swept would act up to a sweep interval late on
+   * every event, and the point of the stream is that it usually does not have to.
    */
   public List<String> signatures() {
-    return union(bySignature.keySet(), rawWants());
+    List<Set<String>> dynamic = new ArrayList<>(rawWants());
+    dynamic.addAll(durableWants());
+    return union(bySignature.keySet(), dynamic);
   }
 
   /**
@@ -165,21 +206,26 @@ public class EventDispatcher {
     }
     List<QitsEventListener<?>> listeners = bySignature.get(frame.name());
     List<QitsRawEventListener> raw = rawListenersFor(frame.name());
-    if (listeners == null && raw.isEmpty()) {
+    List<QitsDurableEventListener> durable = durableListenersFor(frame.name());
+    if (listeners == null && raw.isEmpty() && durable.isEmpty()) {
       // Ordinary: the server may broadcast more than was asked for, and a subscription set is a
       // filter rather than a promise.
       LOG.debugf("no listener for signature %s", frame.name());
       return;
     }
-    CausationScope.with(causeOf(frame), () -> deliver(frame, listeners, raw));
+    CausationScope.with(causeOf(frame), () -> deliver(frame, listeners, raw, durable));
   }
 
   private void deliver(
-      EventFrame frame, List<QitsEventListener<?>> listeners, List<QitsRawEventListener> raw) {
+      EventFrame frame,
+      List<QitsEventListener<?>> listeners,
+      List<QitsRawEventListener> raw,
+      List<QitsDurableEventListener> durable) {
     if (listeners != null) {
       deliverTyped(frame, listeners);
     }
     deliverRaw(frame, raw);
+    deliverDurable(frame, durable);
   }
 
   @SuppressWarnings("unchecked")
@@ -208,6 +254,18 @@ public class EventDispatcher {
     }
   }
 
+  /**
+   * The durable path: the funnel decides, not this loop. It never throws — a listener's failure is
+   * reported rather than raised, precisely so the event can stay owed instead of taking the socket
+   * or the other listeners down — so there is no try/catch here and no result to act on. A live
+   * frame is one of two ways an event can arrive, and the catch-up sweep is the other.
+   */
+  private void deliverDurable(EventFrame frame, List<QitsDurableEventListener> listeners) {
+    for (QitsDurableEventListener listener : listeners) {
+      funnel.offer(listener, frame);
+    }
+  }
+
   /** The raw listeners that want this signature right now — asked of each one, per frame. */
   private List<QitsRawEventListener> rawListenersFor(String name) {
     if (rawListeners.isEmpty()) {
@@ -215,7 +273,22 @@ public class EventDispatcher {
     }
     List<QitsRawEventListener> wanting = new ArrayList<>(rawListeners.size());
     for (QitsRawEventListener listener : rawListeners) {
-      Set<String> wanted = wantedBy(listener);
+      Set<String> wanted = wantedBy(listener::signatures, listener);
+      if (wanted.contains(QitsRawEventListener.ALL) || wanted.contains(name)) {
+        wanting.add(listener);
+      }
+    }
+    return wanting;
+  }
+
+  /** The durable listeners that want this signature right now — asked of each one, per frame. */
+  private List<QitsDurableEventListener> durableListenersFor(String name) {
+    if (durableListeners.isEmpty()) {
+      return List.of();
+    }
+    List<QitsDurableEventListener> wanting = new ArrayList<>(durableListeners.size());
+    for (QitsDurableEventListener listener : durableListeners) {
+      Set<String> wanted = wantedBy(listener::signatures, listener);
       if (wanted.contains(QitsRawEventListener.ALL) || wanted.contains(name)) {
         wanting.add(listener);
       }
@@ -227,22 +300,34 @@ public class EventDispatcher {
   private List<Set<String>> rawWants() {
     List<Set<String>> wants = new ArrayList<>(rawListeners.size());
     for (QitsRawEventListener listener : rawListeners) {
-      wants.add(wantedBy(listener));
+      wants.add(wantedBy(listener::signatures, listener));
+    }
+    return wants;
+  }
+
+  /** Every durable listener's current set, in bean order. */
+  private List<Set<String>> durableWants() {
+    List<Set<String>> wants = new ArrayList<>(durableListeners.size());
+    for (QitsDurableEventListener listener : durableListeners) {
+      wants.add(wantedBy(listener::signatures, listener));
     }
     return wants;
   }
 
   /**
-   * What one raw listener wants, contained. A {@code signatures()} that throws or answers null costs
+   * What one listener wants, contained. A {@code signatures()} that throws or answers null costs
    * that listener the frame (or its place in the subscribe set) and costs nobody else anything — the
    * same trade the delivery loops make, one question earlier.
+   *
+   * <p>Shared by the raw and durable seams because it is the same question with the same containment
+   * either side of it; the {@code owner} is carried only so the log names the bean that misbehaved.
    */
-  private static Set<String> wantedBy(QitsRawEventListener listener) {
+  private static Set<String> wantedBy(Supplier<Set<String>> signatures, Object owner) {
     try {
-      Set<String> wanted = listener.signatures();
+      Set<String> wanted = signatures.get();
       return wanted == null ? Set.of() : wanted;
     } catch (Exception e) {
-      LOG.errorf(e, "raw listener %s could not name its signatures", listener.getClass().getName());
+      LOG.errorf(e, "listener %s could not name its signatures", owner.getClass().getName());
       return Set.of();
     }
   }
@@ -256,7 +341,7 @@ public class EventDispatcher {
    * designed failure here; refusing to dispatch over an id format is not, and a throw out of this
    * method would take out every listener on the frame for the sake of a field none of them read.
    */
-  private static UUID causeOf(EventFrame frame) {
+  static UUID causeOf(EventFrame frame) {
     if (frame.id() == null) {
       return null;
     }

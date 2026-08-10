@@ -38,8 +38,10 @@ public final class RetrySchedule {
    *
    * <p>Gentler than the outbox's factor of four because a dropped stream is the ordinary
    * consequence of qits-events restarting, and the cost of reconnecting a little eagerly is one
-   * handshake — whereas the events missed while disconnected are not replayed, so a long backoff is
-   * a real loss rather than merely a delay.
+   * handshake — whereas an ordinary listener never sees what was broadcast while it was away, so a
+   * long backoff is a real loss rather than merely a delay. A {@link
+   * eu.wohlben.qits.eventstream.QitsDurableEventListener} is the exception that shows the shape of
+   * the rule: it gets the missed events back on its next catch-up sweep, and pays a delay instead.
    */
   public static Duration redialBackoff(int consecutiveFailures, Duration initial, Duration max) {
     Duration backoff = initial;
