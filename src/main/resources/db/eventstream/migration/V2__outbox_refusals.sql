@@ -1,0 +1,18 @@
+-- Splitting the outbox's failure classes: an attempt that got NO answer must not spend the retry
+-- budget.
+--
+-- MEASURED, 2026-08-10. A seed qits-ci was pointed at an alias that did not resolve. Every publish
+-- raised ConnectException, the sweeper counted five of them, and every row ended FAILED — events
+-- that never reached the bus and that nothing would ever try again. "The bus is the record" is only
+-- true if reaching it is never abandoned.
+--
+-- `attempts` keeps its meaning — every attempt, the inline one included — because it is what the
+-- backoff is spaced by: an unreachable bus walks 1s / 4s / 16s / 64s / 4m16s and then re-attempts at
+-- the five-minute cap for as long as it stays down. `refusals` is the new counter, and it is the
+-- only one qits.eventstream.max-attempts bounds: an attempt that got an HTTP response saying no.
+--
+-- DEFAULT 0 IS THE WHOLE BACKFILL, and it is deliberately generous rather than exact. A row already
+-- mid-retry when this lands is credited with no refusals, so its budget starts again — which is the
+-- safe direction, and in any case this table is empty in a healthy process, so the population that
+-- could be mis-counted is a handful of rows in an outage.
+alter table outbox_event add column refusals int not null default 0;

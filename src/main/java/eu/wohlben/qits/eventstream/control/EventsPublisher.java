@@ -16,7 +16,7 @@ import org.jboss.logging.Logger;
  * again by {@link OutboxSweeper} — with identical semantics, which is what makes "a retry is the
  * same request" true rather than merely intended.
  *
- * <p><b>The three answers are three different futures</b>, and collapsing any pair loses something:
+ * <p><b>The four answers are four different futures</b>, and collapsing any pair loses something:
  *
  * <ul>
  *   <li><b>200 / 201</b> — delivered. 201 wrote the row, 200 found it already there with the same
@@ -25,10 +25,20 @@ import org.jboss.logging.Logger;
  *   <li><b>400</b> — rejected, permanently. qits-events answers it when the id exists carrying
  *       <em>different</em> content, i.e. a UUID was reused. Retrying cannot change that, and a row
  *       that kept retrying it would look like an outage.
- *   <li><b>anything else</b> — retryable. A 5xx, a connection refused, a timeout, a proxy's 502:
- *       all "not now", all indistinguishable from each other from here, and all handled the same
- *       way by the outbox.
+ *   <li><b>any other status</b> — refused. A 5xx, a proxy's 502, a 404 from a path that is not
+ *       there: a response <em>arrived</em> and said no. Something is answering, it understood the
+ *       request enough to reject it, and the outbox spends its bounded budget on this class.
+ *   <li><b>no response at all</b> — unreachable. A connection refused, a name that does not
+ *       resolve, a deadline that passed with nothing on the socket. Nothing was learned about the
+ *       event, only about the network, so the outbox <b>never gives up</b> on this class.
  * </ul>
+ *
+ * <p><b>The last two used to be one, and merging them cost real events.</b> Measured on the
+ * 2026-08-10 bootstraps: a seed qits-ci was pointed at an alias that did not resolve, every publish
+ * raised {@code ConnectException}, and five attempts later every row was {@code FAILED} — a hole in
+ * the log that no consumer bookkeeping can recover. A refusal is evidence about the event; an
+ * unreachable bus is evidence about nothing at all, and a budget is only meaningful against
+ * evidence.
  *
  * <p>The call is <b>synchronous and bounded</b>. Synchronous because the caller has to know which
  * of the three happened before it decides whether to persist anything, and bounded because the
@@ -45,22 +55,49 @@ public class EventsPublisher {
   /** The events API's own path under {@code qits.events.url}, which is a bare scheme+host+port. */
   static final String EVENTS_PATH = "/events/api/events/";
 
-  /** What came of one attempt. */
+  /** What came of one attempt. See the class javadoc for why there are four and not three. */
   public enum Outcome {
+
+    /** 200 or 201. The event is in the log. */
     DELIVERED,
+
+    /** 400. The id exists with different content, and no retry can change that. */
     REJECTED,
-    RETRYABLE
+
+    /** A response arrived and it was not a success. Retryable, and it spends the attempt budget. */
+    REFUSED,
+
+    /** No response arrived. Retryable, and it spends <b>nothing</b>: the budget is for refusals. */
+    UNREACHABLE
   }
 
-  /** An attempt's outcome plus the one line of detail an outbox row records. */
+  /**
+   * An attempt's outcome plus the one line of detail an outbox row records.
+   *
+   * <p><b>There is deliberately no {@code retryable()}.</b> Two of these four are retryable and they
+   * are retried differently — one against a budget, one forever — so a single predicate saying
+   * "there will be another attempt" is the exact shape in which the distinction gets collapsed back
+   * again by someone reading only the method name. Each outcome has its own question instead.
+   */
   public record Delivery(Outcome outcome, String detail) {
 
     public boolean delivered() {
       return outcome == Outcome.DELIVERED;
     }
 
-    public boolean retryable() {
-      return outcome == Outcome.RETRYABLE;
+    /** Permanently refused: the reused-id 400, and nothing else. */
+    public boolean rejected() {
+      return outcome == Outcome.REJECTED;
+    }
+
+    /** A response arrived saying no. This is the class the attempt budget bounds. */
+    public boolean refused() {
+      return outcome == Outcome.REFUSED;
+    }
+
+    /** Nothing answered. Retried indefinitely, at the retry schedule's cap. */
+    public boolean unreachable() {
+      return outcome == Outcome.UNREACHABLE;
     }
   }
 
@@ -105,13 +142,16 @@ public class EventsPublisher {
       HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
       return classify(eventId, response);
     } catch (InterruptedException e) {
-      // Restore the flag and treat it as "not now": the caller is a worker being asked to stop, and
-      // the event is worth exactly as much after the restart.
+      // Restore the flag and treat it as "nothing came back": the caller is a worker being asked to
+      // stop, so no answer was reached, and the event is worth exactly as much after the restart.
       Thread.currentThread().interrupt();
-      return new Delivery(Outcome.RETRYABLE, "interrupted");
+      return new Delivery(Outcome.UNREACHABLE, "interrupted");
     } catch (Exception e) {
+      // Every throw out of send() is "no response": a refused connection, an unresolvable name, a
+      // deadline that passed. A status code is the only thing that makes an attempt a refusal, and
+      // there is none here.
       LOG.debugf("PUT %s failed: %s", target, e.toString());
-      return new Delivery(Outcome.RETRYABLE, e.toString());
+      return new Delivery(Outcome.UNREACHABLE, e.toString());
     }
   }
 
@@ -128,7 +168,7 @@ public class EventsPublisher {
       LOG.warnf("event %s rejected as a reused id: %s", eventId, detail);
       return new Delivery(Outcome.REJECTED, detail);
     }
-    return new Delivery(Outcome.RETRYABLE, detail);
+    return new Delivery(Outcome.REFUSED, detail);
   }
 
   /** {@code qits.events.url} is specified without a path; a trailing slash is tolerated rather than doubled. */

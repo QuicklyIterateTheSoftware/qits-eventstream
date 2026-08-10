@@ -137,7 +137,7 @@ application (250) and the environment (300) override any of it. A library jar's 
 | `qits.events.url` | `http://qits-events:8080` | scheme + host + port, **no path**. This module appends `/events/api/events/{id}` and `/events/stream` itself, swapping the scheme to `ws(s)` for the second. A path here yields a doubled one and a 404 nothing retries out of. |
 | `qits.eventstream.enabled` | `true` | the master switch. |
 | `qits.eventstream.publish-timeout` | `PT5S` | the inline attempt's deadline, after which the outbox owns the event. |
-| `qits.eventstream.max-attempts` | `5` | **counts the inline attempt**, so five means the PUT plus four sweeps. |
+| `qits.eventstream.max-attempts` | `5` | the **refusal** budget, counting the inline attempt: five means the PUT plus four sweeps against a service that is answering. An attempt that got no answer spends none of it. |
 | `qits.eventstream.sweep-interval` | `10s` | how often the sweeper looks. A floor on how late a retry can be, never a cause of an early one. |
 | `qits.eventstream.redial-initial-backoff` | `PT1S` | doubled per consecutive failure. |
 | `qits.eventstream.redial-max-backoff` | `PT30S` | the cap. |
@@ -214,9 +214,28 @@ writing the event twice.
 that is delivered on retry is deleted. So the row count is a health signal rather than a log — the
 log is qits-events — and a monitoring check on this table is asking a real question.
 
-Attempts are spaced `1s · 4^(n-1)`, capped at five minutes, held per row in `next_attempt_at`. Two
-ways to stop: the budget runs out, or a 400 comes back, which means a UUID was reused and no amount
-of retrying will change it. Both log; both leave the row `FAILED`.
+Attempts are spaced `1s · 4^(n-1)`, capped at five minutes, held per row in `next_attempt_at`.
+
+**Giving up is bounded by refusals, never by unreachability.** The two failures are different
+evidence and the outbox treats them so:
+
+| what came back | what it means | what the outbox does |
+|---|---|---|
+| 200 / 201 | in the log | delete the row |
+| 400 | a UUID was reused | `FAILED` at once, with a WARN |
+| any other status | something answered and said no | retry, and spend one of `max-attempts` |
+| nothing at all | the bus is unreachable | retry **forever**, at the schedule's five-minute cap |
+
+The last row is why the table has two counters. `attempts` is every try and is what the backoff is
+spaced by; `refusals` counts only the tries that got an answer, and it is the only one the budget
+bounds. The split was bought on 2026-08-10: a publisher aimed at an alias that did not resolve spent
+its whole budget on `ConnectException`s and left `FAILED` rows behind — events that never reached
+the bus, and a hole no consumer-side bookkeeping can recover. *The bus is the record* is only true if
+reaching it is never abandoned.
+
+An unreachable bus is reported once per sweep rather than once per event: a bus that is down is one
+condition however many events are queued behind it, and rows come due at the backoff, so the notice
+rate-limits itself to five-minutely as an outage lengthens.
 
 The known hole is named in `OutboxEvent`'s javadoc and deliberately left open: a crash between the
 inline attempt failing and the row committing loses the event.

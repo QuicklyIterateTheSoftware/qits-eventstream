@@ -32,8 +32,8 @@ class RetryScheduleTest {
 
   @Test
   void theOutboxSpacingIsCappedAtFiveMinutes() {
-    // Unreachable at the shipped budget of five attempts, and the reason raising it extends the
-    // schedule instead of discovering it has none.
+    // Where a row waiting on an unreachable bus lives: those attempts spend no budget, so the curve
+    // is walked out and then this is the spacing for as long as the outage lasts.
     assertEquals(Duration.ofMinutes(5), RetrySchedule.outboxBackoff(6));
     assertEquals(Duration.ofMinutes(5), RetrySchedule.outboxBackoff(60));
   }

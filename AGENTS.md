@@ -74,6 +74,21 @@ review. Its javadoc argues the widening.
   nothing; a row that is delivered on retry is deleted. So the row count is a health signal rather
   than a log, and the log is qits-events. The known hole — a crash between the inline attempt
   failing and the row committing — is named in `OutboxEvent`'s javadoc and deliberately left open.
+
+  **The retry budget bounds REFUSALS, and nothing bounds an unreachable bus.** `EventsPublisher`
+  answers with four outcomes, not three: delivered, rejected (the 400), refused (a response arrived
+  and said no) and unreachable (no response at all). Only refusals draw on
+  `qits.eventstream.max-attempts`; an unreachable attempt is rescheduled indefinitely and settles at
+  the schedule's five-minute cap. Hence the two counters on the row — `attempts` spaces the backoff,
+  `refusals` spends the budget — and hence the WARN in `OutboxSweeper`, which is the only notice an
+  outage now gets and is emitted **once per sweep, not once per event**.
+
+  Measured, 2026-08-10: a seed qits-ci dialled an alias that did not resolve, five
+  `ConnectException`s later every row was `FAILED`, and those events never reached the log. There is
+  no consumer-side bookkeeping that recovers a publish that was abandoned, which is why this is a
+  rule and not a tuning parameter. Do not re-merge the two classes, and do not give `Delivery` a
+  `retryable()` again: one predicate over two differently-retried outcomes is exactly the shape in
+  which the distinction gets collapsed back.
 - **Causation is stamped by the bus, in the envelope, and it never touches an event class.**
   `EventEnvelope` carries a nullable `parentId` and `QitsEventBus.publish` is the only place it is
   resolved. The precedence is the whole rule: **an explicit non-null argument wins; a null or absent
