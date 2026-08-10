@@ -30,13 +30,26 @@ public class EmbeddedPgConfigSource implements ConfigSource {
    */
   private static final String DATABASE = "eventstream_test";
 
+  /**
+   * A second database backing the suite's DEFAULT persistence unit — the consumer's shape, stood up
+   * so {@code CausationRowStampingTest} can prove the entity-listener stamping against the same
+   * arrangement a service has: its own entities in the default unit, this jar's outbox in the named
+   * one. Separate databases for the same reason a consumer has separate ones.
+   */
+  private static final String CONSUMER_DATABASE = "eventstream_consumer_test";
+
   private static final String PREFIX = "quarkus.datasource.eventstream.";
+
+  private static final String DEFAULT_PREFIX = "quarkus.datasource.";
 
   private final Map<String, String> values =
       Map.of(
           PREFIX + "jdbc.url", EmbeddedPg.url(DATABASE),
           PREFIX + "username", EmbeddedPg.USER,
-          PREFIX + "password", EmbeddedPg.PASSWORD);
+          PREFIX + "password", EmbeddedPg.PASSWORD,
+          DEFAULT_PREFIX + "jdbc.url", EmbeddedPg.url(CONSUMER_DATABASE),
+          DEFAULT_PREFIX + "username", EmbeddedPg.USER,
+          DEFAULT_PREFIX + "password", EmbeddedPg.PASSWORD);
 
   @Override
   public int getOrdinal() {

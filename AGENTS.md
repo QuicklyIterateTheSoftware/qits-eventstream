@@ -33,9 +33,10 @@ produces one jar. The pom is the parent and the module at once.
 `eu.wohlben.qits.eventstream.*`:
 
 - the root package — `QitsEvent`, `QitsEventBus`, `QitsEventListener`, `QitsRawEventListener`,
-  `QitsDurableEventListener`, `CausationScope`, `CausationHeader`. The public surface, and the only
-  things a consumer should name. `CausationClientFilter` and `CausationServerFilter` sit beside
-  them because they share `CausationScope`'s package-private `swap`; a consumer never names either.
+  `QitsDurableEventListener`, `CausationScope`, `CausationHeader`, `CausedRow`, `CausationStamp`,
+  `Uncaused`. The public surface, and the only things a consumer should name.
+  `CausationClientFilter` and `CausationServerFilter` sit beside them because they share
+  `CausationScope`'s package-private `swap`; a consumer never names either.
 - `control/` — `CanonicalJson`, `EventsPublisher`, `EventsQuery`, `Outbox`, `OutboxSweeper`,
   `RetrySchedule`, `EventDispatcher`, `EventStreamSubscriber`, `DurableFunnel`, `CatchupSweeper`,
   `EventstreamClock`, and the three wire records `EventEnvelope`, `EventFrame` and `EventPage`.
@@ -141,6 +142,19 @@ review. Its javadoc argues the widening.
   are test scope only, because the load-bearing assumption is a thread one — RESTEasy Reactive
   runs both filters and a blocking resource method on one worker — and
   `CausationRestPropagationTest` proves it on a real wire.
+
+  **Causation reaches the rows through a JPA entity listener, opt-in per entity.** `CausedRow`
+  (interface) + `@EntityListeners(CausationStamp.class)` + the entity's own nullable `causation_id`
+  column and migration; the stamp fills a null from `CausationScope.current()`. The property that
+  makes a ThreadLocal source safe here: **`@PrePersist` fires at `persist()`, on the calling
+  thread, not later at flush** — `CausationRowStampingTest` closes the scope before the commit to
+  prove it. An interface rather than a mapped superclass (entities spent their single inheritance
+  on `PanacheEntity`), reached without reflection (native-image visible). Insert-only by decision —
+  no `@PreUpdate`, the column is creation history — and the author's own value wins, the same
+  precedence as everywhere else. Never a foreign key: the event lives in qits-events' store.
+  `Uncaused` is the written opt-out; nothing here enforces completeness — that is qits-arch-rules'
+  job (qits-integrations-quarkus), which matches these types BY NAME, so renaming `CausedRow`,
+  `CausationStamp` or `Uncaused` breaks that suite's contract and every consumer's build with it.
 
   **No cycle guard and no self-parent repair, here or anywhere on this side.** A guard that catches
   only `A → A` cannot see `A → B → A` and its presence would tell a reader that cycles are handled;
@@ -309,11 +323,19 @@ add it here.
 
 ## The suite
 
-110 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
+115 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
 The database is `eventstream_test` on that instance, named for this repository rather than for a
 module so a consumer's suite spawning its own postgres on the same host cannot mean the same one.
 `clean-at-start` wipes the schema between Quarkus restarts, which is what keeps a suite sharing one
 database across classes reproducible.
+
+A second database, `eventstream_consumer_test`, backs the suite's DEFAULT persistence unit — the
+consumer's stand-in, holding the `consumer/CausedThing` fixture so row stamping is proved in the
+exact arrangement a service has. With a named unit present the default one needs its own package
+claim, and the claims are prefix matches — which is why the fixture sits in its own `consumer`
+subpackage the named unit's `entity` claim cannot reach. Its schema comes from Hibernate
+(`schema-management.strategy=drop-and-create`), not Flyway: it is a fixture, and this jar owns no
+migrations for it.
 
 Four conventions in `src/test/resources/application.properties` are load-bearing:
 
