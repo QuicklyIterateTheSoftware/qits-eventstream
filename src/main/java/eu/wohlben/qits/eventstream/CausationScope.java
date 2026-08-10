@@ -56,6 +56,13 @@ import java.util.UUID;
  * the rest. This class <em>is</em> the extension point — the additive shape a later feature would
  * take is {@code wrap(Runnable)} / {@code wrap(Executor)}, capturing {@link #current()} at submit
  * time and re-establishing it at run time — and it needs no wire change on the day it is wanted.
+ *
+ * <p>Propagation across an <em>HTTP hop</em> is here, and it is a different feature from the one
+ * ruled out above: the hand-off is a request on a wire, not a task on a thread. {@link
+ * CausationClientFilter} writes {@link #current()} into the {@link CausationHeader#NAME} header of
+ * an outgoing REST-client request; {@link CausationServerFilter} reads it back and establishes the
+ * scope for the receiving resource method. A chain that crosses a service boundary stays whole
+ * without either side naming a parent.
  */
 public final class CausationScope {
 
@@ -87,6 +94,19 @@ public final class CausationScope {
     } finally {
       set(previous);
     }
+  }
+
+  /**
+   * Replace the ambient cause and hand back what was there, for a caller that enters at one method
+   * and leaves at another and so cannot wrap its region in a {@link Runnable} — the paired REST
+   * filters in {@link CausationServerFilter}, which are the only caller. Package-private on
+   * purpose: everyone who <em>can</em> use {@link #with} must, because a swap whose counterpart
+   * never runs is exactly the leak {@code with}'s {@code finally} exists to make impossible.
+   */
+  static UUID swap(UUID value) {
+    UUID previous = CURRENT.get();
+    set(value);
+    return previous;
   }
 
   /** Null is an absence, not a value: {@code remove()} so a pooled thread carries no entry. */

@@ -154,8 +154,33 @@
             <artifactId>quarkus-websockets-next</artifactId>
         </dependency>
         <dependency>
+            <!-- The JAX-RS API and nothing more, for the two causation filters. The API jar is
+                 what lets them compile here and stay inert elsewhere: a consumer with quarkus-rest
+                 or quarkus-rest-client discovers them through the index, a consumer with neither
+                 never instantiates them. quarkus-rest itself must NOT sit here — a compile-scope
+                 extension would bolt an HTTP server onto every consumer, including the daemons
+                 that deliberately serve nothing. -->
+            <groupId>jakarta.ws.rs</groupId>
+            <artifactId>jakarta.ws.rs-api</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The far end the causation filters need under test: a real resource behind a real
+                 HTTP request, because the load-bearing assumption is a THREAD one — RESTEasy
+                 Reactive runs filters and a blocking resource method on the same worker — and only
+                 the wire can prove it. Test scope for the reason the API jar above is compile
+                 scope. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-client</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
