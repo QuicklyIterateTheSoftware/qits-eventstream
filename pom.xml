@@ -208,6 +208,15 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <!-- The musl build, for the platform's own CI: the step container is Alpine, where
+                 the glibc binaries above cannot start and the whole suite dies at the config
+                 source naming zonky. Found by the first post-receive verify of the postgres-based
+                 suite, 2026-08-10. -->
+            <groupId>io.zonky.test.postgres</groupId>
+            <artifactId>embedded-postgres-binaries-linux-amd64-alpine</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>io.zonky.test.postgres</groupId>
             <artifactId>embedded-postgres-binaries-darwin-arm64v8</artifactId>
             <scope>test</scope>
