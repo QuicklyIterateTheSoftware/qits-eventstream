@@ -1,5 +1,6 @@
 package eu.wohlben.qits.eventstream.control;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.util.List;
 
 /**
@@ -18,5 +19,12 @@ import java.util.List;
  * <p>Package-private: it is the wire between {@link EventsQuery} and {@link CatchupSweeper} and no
  * consumer of this library ever holds one. {@link EventFrame} is public because a listener receives
  * it; this is not.
+ *
+ * <p>{@code @RegisterForReflection} is load-bearing, not decoration, and it can live nowhere else:
+ * Jackson builds this record reflectively inside a NATIVE image, and a package-private type is one
+ * no consumer's own reflection holder can reach. Measured on the first bus-only bootstrap: without
+ * it every catch-up sweep died at initialization — the durable safety net off, in the binary only,
+ * while every JVM test stayed green.
  */
+@RegisterForReflection
 record EventPage(List<EventFrame> events, String nextCursor) {}

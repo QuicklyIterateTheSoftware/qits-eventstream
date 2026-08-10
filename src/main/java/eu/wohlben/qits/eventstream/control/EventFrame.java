@@ -27,6 +27,7 @@ import java.time.Instant;
  * with — the arriving event is the cause of whatever the listener publishes, and its own parent is
  * the previous hop's business.
  */
+@io.quarkus.runtime.annotations.RegisterForReflection
 public record EventFrame(
     String id,
     String name,
