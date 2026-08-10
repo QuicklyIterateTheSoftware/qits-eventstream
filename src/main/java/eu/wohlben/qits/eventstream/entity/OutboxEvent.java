@@ -72,9 +72,29 @@ public class OutboxEvent extends PanacheEntityBase {
   @Column(nullable = false, length = 16)
   public OutboxStatus status;
 
-  /** Delivery attempts made so far, <b>counting the inline one</b> — so a fresh row starts at 1. */
+  /**
+   * Delivery attempts made so far, <b>counting the inline one</b> — so a fresh row starts at 1.
+   *
+   * <p>Every attempt, whatever came of it. This is what the backoff is spaced by, which is why an
+   * unreachable bus still advances it: the row walks out to the five-minute cap rather than
+   * re-attempting a dead socket every second. It is <em>not</em> the retry budget; see {@link
+   * #refusals}.
+   */
   @Column(nullable = false)
   public int attempts;
+
+  /**
+   * Attempts that got an HTTP response saying no — and the only counter {@code
+   * qits.eventstream.max-attempts} bounds.
+   *
+   * <p><b>The split exists because merging the two lost events.</b> A publisher dialling an alias
+   * that did not resolve spent its whole budget on {@code ConnectException}s and left {@code FAILED}
+   * rows behind: events that never reached the bus and that nothing would try again. A refusal is
+   * evidence about this event; a connection that was never made is evidence about the network, so
+   * only the first kind may run a row out of tries.
+   */
+  @Column(nullable = false)
+  public int refusals;
 
   /** When the sweeper may try again. Null once the row is {@link OutboxStatus#FAILED}. */
   @Column(name = "next_attempt_at")

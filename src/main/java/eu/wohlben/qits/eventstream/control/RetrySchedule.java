@@ -14,11 +14,13 @@ public final class RetrySchedule {
    * The outbox schedule: {@code 1s · 4^(attempts-1)}, capped at five minutes.
    *
    * <p>{@code attempts} is the number of delivery attempts <b>already made</b>, the inline one
-   * included, so the spacing after each failure runs 1s, 4s, 16s, 64s, 4m16s. With the shipped
-   * budget of five attempts only the first four of those are ever used — the fifth failure is
-   * terminal — and the cap likewise never binds. Both are here because the formula is the
-   * specification, and raising {@code qits.eventstream.max-attempts} must extend the schedule
-   * rather than discover it has none.
+   * included, so the spacing after each failure runs 1s, 4s, 16s, 64s, 4m16s and then the cap.
+   *
+   * <p><b>The cap is where an unreachable bus lives, which is why it is a cap and not the end.</b> A
+   * delivery that got no response at all does not spend the retry budget — see {@link Outbox} — so a
+   * row waiting for qits-events to come back walks this schedule out and then re-attempts every five
+   * minutes for as long as that takes. The budget bounds refusals, and a refusal budget of five
+   * reaches only the first four gaps; the rest of the curve is not decoration.
    */
   public static Duration outboxBackoff(int attempts) {
     Duration backoff = Duration.ofSeconds(1);
@@ -36,8 +38,10 @@ public final class RetrySchedule {
    *
    * <p>Gentler than the outbox's factor of four because a dropped stream is the ordinary
    * consequence of qits-events restarting, and the cost of reconnecting a little eagerly is one
-   * handshake — whereas the events missed while disconnected are not replayed, so a long backoff is
-   * a real loss rather than merely a delay.
+   * handshake — whereas an ordinary listener never sees what was broadcast while it was away, so a
+   * long backoff is a real loss rather than merely a delay. A {@link
+   * eu.wohlben.qits.eventstream.QitsDurableEventListener} is the exception that shows the shape of
+   * the rule: it gets the missed events back on its next catch-up sweep, and pays a delay instead.
    */
   public static Duration redialBackoff(int consecutiveFailures, Duration initial, Duration max) {
     Duration backoff = initial;

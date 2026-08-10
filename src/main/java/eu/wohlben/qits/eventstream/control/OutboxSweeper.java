@@ -27,6 +27,11 @@ import org.jboss.logging.Logger;
  * <p>{@link #sweep()} is public and returns what it did, which is how the retry schedule is tested:
  * a test moves its clock to the row's {@code nextAttemptAt} and calls this, instead of sleeping
  * through eighty seconds of real backoff.
+ *
+ * <p><b>An unreachable bus is reported here, once per sweep.</b> Nothing gives up on it any more
+ * (see {@link Outbox}), so without a periodic notice the failure it replaced — a give-up WARN per
+ * event — would have become no notice at all. One line per sweep rather than one per row: a bus that
+ * is down is a single condition however many events are queued behind it.
  */
 @ApplicationScoped
 public class OutboxSweeper {
@@ -61,6 +66,8 @@ public class OutboxSweeper {
     }
     Instant now = clock.instant();
     List<OutboxEvent> due = outbox.due(now);
+    int unreachable = 0;
+    String silence = null;
     for (OutboxEvent row : due) {
       // Rebuilt from the stored columns and from nothing else — including parent_id, which the
       // server compares. A parent re-read from the ambient context here would be whatever the
@@ -74,7 +81,22 @@ public class OutboxSweeper {
         outbox.delivered(row.id);
       } else {
         outbox.attemptFailed(row.id, attempt);
+        if (attempt.unreachable()) {
+          unreachable++;
+          silence = attempt.detail();
+        }
       }
+    }
+    if (unreachable > 0) {
+      // ONE WARN PER SWEEP, not one per event. A bus that is down is a single condition however many
+      // events are waiting behind it, and the give-up WARN that used to be the only notice of this
+      // is gone by design — nothing gives up any more, so this is the only thing that will say the
+      // log is falling behind. It rate-limits itself as the outage lengthens: rows come due at the
+      // backoff, so once the curve is walked out this is five-minutely.
+      LOG.warnf(
+          "qits-events is unreachable: %d of %d due event(s) got no answer and will keep being"
+              + " retried (%s)",
+          unreachable, due.size(), silence);
     }
     if (!due.isEmpty()) {
       LOG.debugf("outbox sweep attempted %d row(s)", due.size());

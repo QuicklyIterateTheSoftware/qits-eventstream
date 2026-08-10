@@ -23,6 +23,13 @@ import org.jboss.logging.Logger;
  *
  * <p>A delivered row is <b>deleted</b> rather than marked. The outbox is what has not arrived; the
  * record of what has is qits-events, which is the point of publishing to it.
+ *
+ * <p><b>Giving up is bounded by refusals, never by unreachability.</b> {@code
+ * qits.eventstream.max-attempts} counts attempts that got an HTTP response saying no; an attempt
+ * that got no response at all is rescheduled without spending any of it, so a bus that is down is
+ * retried for as long as it is down — at the retry schedule's five-minute cap once the curve is
+ * walked out. "The bus is the record" is only true if reaching it is never abandoned, and this is
+ * where that sentence is either kept or broken.
  */
 @ApplicationScoped
 public class Outbox {
@@ -36,6 +43,7 @@ public class Outbox {
 
   @Inject Clock clock;
 
+  /** The <b>refusal</b> budget. An attempt that got no answer does not draw on it. */
   @ConfigProperty(name = "qits.eventstream.max-attempts", defaultValue = "5")
   int maxAttempts;
 
@@ -94,28 +102,44 @@ public class Outbox {
 
   /**
    * The one decision this class makes, shared by the inline path and the sweeper so the two cannot
-   * drift: a rejection is terminal at once, an exhausted budget is terminal, and anything else gets
-   * a next time at {@link RetrySchedule}'s spacing.
+   * drift: a rejection is terminal at once, an exhausted <em>refusal</em> budget is terminal, and
+   * anything else gets a next time at {@link RetrySchedule}'s spacing.
+   *
+   * <p><b>The two counters are two different questions and that is the whole of this method.</b>
+   * {@code attempts} counts every try and is what the backoff is spaced by, so an unreachable bus
+   * still walks the curve out to the five-minute cap instead of hammering a dead socket every
+   * second. {@code refusals} counts only the tries that got an answer, and it is the only one {@code
+   * max-attempts} bounds — because a refusal is evidence about this event, while a connection that
+   * was never made is evidence about the network and says nothing about whether the event is
+   * deliverable.
    */
   private void apply(OutboxEvent row, EventsPublisher.Delivery attempt) {
     row.lastError = truncate(attempt.detail());
-    if (!attempt.retryable()) {
-      row.status = OutboxStatus.FAILED;
-      row.nextAttemptAt = null;
-      LOG.warnf("event %s (%s) is unretryable after %d attempts: %s", row.id, row.name, row.attempts, row.lastError);
+    if (attempt.rejected()) {
+      giveUp(row, "is unretryable");
       return;
     }
-    if (row.attempts >= maxAttempts) {
-      row.status = OutboxStatus.FAILED;
-      row.nextAttemptAt = null;
-      LOG.warnf("event %s (%s) gave up after %d attempts: %s", row.id, row.name, row.attempts, row.lastError);
-      return;
+    if (attempt.refused()) {
+      row.refusals++;
+      if (row.refusals >= maxAttempts) {
+        giveUp(row, "gave up");
+        return;
+      }
     }
     row.status = OutboxStatus.PENDING;
     row.nextAttemptAt = clock.instant().plus(RetrySchedule.outboxBackoff(row.attempts));
     LOG.debugf(
         "event %s (%s) attempt %d failed, next at %s: %s",
         row.id, row.name, row.attempts, row.nextAttemptAt, row.lastError);
+  }
+
+  /** The end of the line for one row. Both ways there are a WARN: nothing else will mention it. */
+  private void giveUp(OutboxEvent row, String what) {
+    row.status = OutboxStatus.FAILED;
+    row.nextAttemptAt = null;
+    LOG.warnf(
+        "event %s (%s) %s after %d attempts (%d refused): %s",
+        row.id, row.name, what, row.attempts, row.refusals, row.lastError);
   }
 
   private static String truncate(String detail) {

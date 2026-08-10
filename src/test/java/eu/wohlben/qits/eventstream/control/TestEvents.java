@@ -1,6 +1,7 @@
 package eu.wohlben.qits.eventstream.control;
 
 import eu.wohlben.qits.eventstream.CausationScope;
+import eu.wohlben.qits.eventstream.QitsDurableEventListener;
 import eu.wohlben.qits.eventstream.QitsEvent;
 import eu.wohlben.qits.eventstream.QitsEventBus;
 import eu.wohlben.qits.eventstream.QitsEventListener;
@@ -15,6 +16,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 /**
  * The event types and listeners this module's own suite uses.
@@ -385,6 +387,125 @@ public final class TestEvents {
     @Override
     public void onFrame(EventFrame frame) {
       // Nothing. Being subscribed for is the whole of what it is here to prove.
+    }
+  }
+
+  // -- the durable seam ----------------------------------------------------------------------------
+
+  /**
+   * The consumer id the durable listener below stores under. A literal a person chose, which is what
+   * {@code consumerId()} is for; the tables are wiped between tests, so every test that arms this
+   * listener meets it as a brand-new consumer.
+   */
+  public static final String DURABLE_CONSUMER_ID = "test.durable-recorder";
+
+  /**
+   * A durable listener the tests drive, <b>disarmed by default</b> — it wants nothing, so it is
+   * absent from the subscribe frame (which another suite asserts literally), it is skipped by the
+   * catch-up sweep, and it writes no watermark until a test asks it to.
+   *
+   * <p>Everything a durable listener can do wrong is a switch on it: refusing an event, failing to
+   * decide, throwing out of the handler. Each is one of the funnel's branches, and each is a
+   * different row in the two tables afterwards.
+   */
+  @ApplicationScoped
+  public static class RecordingDurableListener implements QitsDurableEventListener {
+
+    private final AtomicReference<Set<String>> wanted = new AtomicReference<>(Set.of());
+    private final AtomicReference<Predicate<EventFrame>> selector = new AtomicReference<>(f -> true);
+    private final List<EventFrame> frames = new CopyOnWriteArrayList<>();
+    private final List<Optional<UUID>> causes = new CopyOnWriteArrayList<>();
+    private final AtomicReference<String> failOnId = new AtomicReference<>();
+    private final AtomicBoolean failWhenAsked = new AtomicBoolean();
+    private final AtomicBoolean fromEpoch = new AtomicBoolean();
+
+    @Override
+    public String consumerId() {
+      return DURABLE_CONSUMER_ID;
+    }
+
+    @Override
+    public Set<String> signatures() {
+      return wanted.get();
+    }
+
+    @Override
+    public boolean selects(EventFrame frame) {
+      if (failWhenAsked.get()) {
+        throw new IllegalStateException("a durable listener that cannot decide");
+      }
+      return selector.get().test(frame);
+    }
+
+    @Override
+    public void onFrame(EventFrame frame) {
+      // Read inside the handler, which is the only place it means anything — and the claim of the
+      // interface's javadoc: causation is identical on both channels.
+      causes.add(Optional.ofNullable(CausationScope.current()));
+      frames.add(frame);
+      if (frame.id().equals(failOnId.get())) {
+        throw new IllegalStateException("a durable handler that fails on " + frame.id());
+      }
+    }
+
+    @Override
+    public boolean replayFromEpoch() {
+      return fromEpoch.get();
+    }
+
+    /** Want exactly these signatures from now on. */
+    public void wants(String... signatures) {
+      wanted.set(Set.of(signatures));
+    }
+
+    /** Want everything — the case that queries the log with no name filter at all. */
+    public void wantsEverything() {
+      wanted.set(Set.of(QitsRawEventListener.ALL));
+    }
+
+    /** Act only on the events this predicate accepts; the rest must leave no row. */
+    public void selectsOnly(Predicate<EventFrame> predicate) {
+      selector.set(predicate);
+    }
+
+    /** Throw out of the handler for one event id, so the claim has to roll back with it. */
+    public void failOn(String eventId) {
+      failOnId.set(eventId);
+    }
+
+    /** Throw out of {@code selects}, which must leave the event owed rather than settle it. */
+    public void failWhenAsked() {
+      failWhenAsked.set(true);
+    }
+
+    /** Start at the beginning of the log instead of at its head. */
+    public void replaysFromEpoch() {
+      fromEpoch.set(true);
+    }
+
+    /** Every frame handled, in the order the handler saw them. */
+    public List<EventFrame> frames() {
+      return List.copyOf(frames);
+    }
+
+    /** The ids handled, which is what a paging assertion compares against. */
+    public List<String> handledIds() {
+      return frames.stream().map(EventFrame::id).toList();
+    }
+
+    /** The ambient cause seen on each arrival, empty where there was none. */
+    public List<Optional<UUID>> causes() {
+      return List.copyOf(causes);
+    }
+
+    public void reset() {
+      wanted.set(Set.of());
+      selector.set(frame -> true);
+      frames.clear();
+      causes.clear();
+      failOnId.set(null);
+      failWhenAsked.set(false);
+      fromEpoch.set(false);
     }
   }
 

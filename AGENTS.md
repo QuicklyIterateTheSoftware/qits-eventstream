@@ -12,8 +12,8 @@ credentials, no prior `mvn install` anywhere, no submodule to initialise. Anythi
 that is not a tradeoff to weigh, it is the thing this repo exists to make possible.
 
 That is why the pom duplicates versions instead of inheriting them, and why the suite stands up its
-own stub qits-events (`StubEventsServer`, a JDK `HttpServer` and a `websockets-next` client dialling
-it) rather than needing a real one. There are no integration tests and no `skipITs` property: the
+own stub qits-events (`StubEventsServer`, a Vert.x server answering the PUT, the list route and the
+websocket upgrade) rather than needing a real one. There are no integration tests and no `skipITs` property: the
 whole suite is surefire, and there is nothing here that only real infrastructure could exercise.
 
 **The store being PostgreSQL does not change that answer.** `testdb/EmbeddedPg` starts **zonky's**
@@ -33,12 +33,16 @@ produces one jar. The pom is the parent and the module at once.
 `eu.wohlben.qits.eventstream.*`:
 
 - the root package — `QitsEvent`, `QitsEventBus`, `QitsEventListener`, `QitsRawEventListener`,
-  `CausationScope`. The public surface, and the only things a consumer should name.
-- `control/` — `CanonicalJson`, `EventsPublisher`, `Outbox`, `OutboxSweeper`, `RetrySchedule`,
-  `EventDispatcher`, `EventStreamSubscriber`, `EventstreamClock`, and the two wire records
-  `EventEnvelope` and `EventFrame`. `EventFrame` is public because a raw listener receives it.
-- `entity/`, `persistence/` — the outbox row and its Panache repository, in this jar's own named
-  persistence unit.
+  `QitsDurableEventListener`, `CausationScope`. The public surface, and the only things a consumer
+  should name.
+- `control/` — `CanonicalJson`, `EventsPublisher`, `EventsQuery`, `Outbox`, `OutboxSweeper`,
+  `RetrySchedule`, `EventDispatcher`, `EventStreamSubscriber`, `DurableFunnel`, `CatchupSweeper`,
+  `EventstreamClock`, and the three wire records `EventEnvelope`, `EventFrame` and `EventPage`.
+  `EventFrame` is public because a listener receives it; `EventPage` is not, because nobody outside
+  the catch-up loop holds one.
+- `entity/`, `persistence/` — the outbox row and the consumer watermark with their Panache
+  repositories, in this jar's own named persistence unit, plus `ConsumedEvents`, which is native SQL
+  over a table with no entity (its javadoc says why).
 - `testdb/` (test sources only) — `EmbeddedPg` and `EmbeddedPgConfigSource`, the embedded postgres
   the suite runs the outbox against. It is under this library's package like everything else here,
   because the extraction rule admits no other.
@@ -50,7 +54,7 @@ this module out a `git mv` plus a pom; that is done, but the direction it protec
 and the split is undone. `ExtractionRuleTest` greps the sources, so it fails a build rather than a
 review. Its javadoc argues the widening.
 
-## The six things that are easy to get wrong
+## The seven things that are easy to get wrong
 
 - **The canonical form is a wire contract, not a formatting preference.** qits-events stores the
   `payload` string verbatim and compares it byte-for-byte to tell an idempotent replay (200) from a
@@ -74,6 +78,21 @@ review. Its javadoc argues the widening.
   nothing; a row that is delivered on retry is deleted. So the row count is a health signal rather
   than a log, and the log is qits-events. The known hole — a crash between the inline attempt
   failing and the row committing — is named in `OutboxEvent`'s javadoc and deliberately left open.
+
+  **The retry budget bounds REFUSALS, and nothing bounds an unreachable bus.** `EventsPublisher`
+  answers with four outcomes, not three: delivered, rejected (the 400), refused (a response arrived
+  and said no) and unreachable (no response at all). Only refusals draw on
+  `qits.eventstream.max-attempts`; an unreachable attempt is rescheduled indefinitely and settles at
+  the schedule's five-minute cap. Hence the two counters on the row — `attempts` spaces the backoff,
+  `refusals` spends the budget — and hence the WARN in `OutboxSweeper`, which is the only notice an
+  outage now gets and is emitted **once per sweep, not once per event**.
+
+  Measured, 2026-08-10: a seed qits-ci dialled an alias that did not resolve, five
+  `ConnectException`s later every row was `FAILED`, and those events never reached the log. There is
+  no consumer-side bookkeeping that recovers a publish that was abandoned, which is why this is a
+  rule and not a tuning parameter. Do not re-merge the two classes, and do not give `Delivery` a
+  `retryable()` again: one predicate over two differently-retried outcomes is exactly the shape in
+  which the distinction gets collapsed back.
 - **Causation is stamped by the bus, in the envelope, and it never touches an event class.**
   `EventEnvelope` carries a nullable `parentId` and `QitsEventBus.publish` is the only place it is
   resolved. The precedence is the whole rule: **an explicit non-null argument wins; a null or absent
@@ -110,11 +129,12 @@ review. Its javadoc argues the widening.
   only `A → A` cannot see `A → B → A` and its presence would tell a reader that cycles are handled;
   detection belongs where the graph is visible. qits-events does reject a self-edge, because that
   one is decidable from a single row.
-- **There are two consuming seams, and the typed one is the one to reach for.** `QitsEventListener<E>`
+- **There are three consuming seams, and the typed one is the one to reach for.** `QitsEventListener<E>`
   names an event *class* at compile time; `QitsRawEventListener` names a `Set<String>` of event
   *names* at runtime and receives the `EventFrame` itself. The raw one exists for consumers whose
   interest is genuinely unknowable at startup. A raw listener that could have named its event type
-  is a typed listener with extra steps.
+  is a typed listener with extra steps. `QitsDurableEventListener` is the third and has its own
+  section below.
 
   **The subscribe frame is the union of both, and `"*"` collapses it.** `EventDispatcher.signatures()`
   unions every typed listener's signature with every raw listener's current set, sorted; the literal
@@ -129,11 +149,35 @@ review. Its javadoc argues the widening.
   interest can grow should return `Set.of(ALL)` once and filter for itself, and the subscriber's "no
   signatures, no stream" rule then never surprises anyone.
 
-  **Dispatch order is typed first, raw second, and it is a contract rather than an accident.** Both
-  run for a frame both want, each listener gets it once, and containment is symmetric — a throw out
+  **Dispatch order is typed, raw, durable, and it is a contract rather than an accident.** Every path
+  runs for a frame it wants, each listener gets it once, and containment is symmetric — a throw out
   of `onFrame`, or out of `signatures()`, costs that listener and nobody else, exactly as a throw
   out of `onEvent` does, because the caller is still a socket callback. **Causation is identical
-  too**: both paths run inside the *same single* `CausationScope` of the arriving frame's id.
+  too**: every path runs inside the *same single* `CausationScope` of the arriving frame's id.
+- **A durable listener's guarantee is exactly-once EFFECT, and every word of that is load-bearing.**
+  Not exactly-once delivery: a handler can be *called* twice for one event, and the second call is
+  the retry of one whose transaction rolled back. What happens once is the commit.
+
+  **One funnel, both channels.** `DurableFunnel.offer` is the only way an event reaches a durable
+  listener, and a live frame and a catch-up row take it identically: `selects` → claim
+  `consumed_event` → call the handler, all inside one transaction. Do not add a second path. The
+  claim is `insert … on conflict do nothing` rather than read-then-insert, because the two channels
+  race by construction — the socket's worker thread and the scheduler's — and only the primary key
+  closes that window.
+
+  **A throw leaves the event owed, and the watermark is what enforces it.** The claim rolls back with
+  the handler, `CatchupSweeper` stops paging for that listener, and the watermark stays at the end of
+  the last *complete* page. A page half-processed is not progress. Equally: a `selects` that throws
+  is a failure and not a "no", because a "no" would let the watermark pass an event the listener
+  wanted, and the watermark never goes backwards.
+
+  **A new consumer starts at the head of the log.** `replayFromEpoch()` is the opt-in and the default
+  is false; anything else means the first deployment of every new subscriber re-acts on all history.
+  `consumerId()` is storage, not a label — it keys both tables and must survive class renames.
+
+  **Pruning mixes two clocks on purpose.** The claim carries `handled_at` (this consumer's clock) and
+  the cut is derived from the watermark's `occurred_at` (the publisher's). A day of horizon is what
+  makes that safe; shortening it to minutes would make host clock skew load-bearing.
 
 ## The store, and the lineage that restarted at V1
 
@@ -154,7 +198,8 @@ database ever ran the H2 files, so no `V3__move_to_postgres.sql` had a reader. T
 is those two migrations translated and merged: `text` instead of `clob`, and V2's `parent_id` folded
 into the table with **no backfill**, since every database reaching it is empty. **A clean start is
 not a precedent** — the ordinary rule (append, never edit an applied migration) is back from V1
-onward.
+onward, and V2 (`refusals`) and V3 (`consumed_event` + `consumer_watermark`) are that rule being
+followed.
 
 Two translation notes worth keeping:
 
@@ -247,23 +292,27 @@ add it here.
 
 ## The suite
 
-76 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
+103 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
 The database is `eventstream_test` on that instance, named for this repository rather than for a
 module so a consumer's suite spawning its own postgres on the same host cannot mean the same one.
 `clean-at-start` wipes the schema between Quarkus restarts, which is what keeps a suite sharing one
 database across classes reproducible.
 
-Three conventions in `src/test/resources/application.properties` are load-bearing:
+Four conventions in `src/test/resources/application.properties` are load-bearing:
 
 - **`quarkus.http.test-port=0`.** This module registers no route of its own — `websockets-next` is
   here for its CLIENT — but the extension brings an HTTP server along and a `@QuarkusTest` starts
   it. Several test classes ask for different configurations, so Quarkus restarts between them, and
   on the default 8081 the next instance races the previous one's release. Port 0 takes a free one.
   Keep it: 8081 is occupied on more than one development host.
-- **`qits.eventstream.sweep-interval=24h`.** The scheduler must not sweep behind a test's back:
-  every outbox assertion drives `OutboxSweeper#sweep` by hand, against a clock it moved, and a
-  background tick landing in the middle makes the attempt counts non-deterministic. The job still
-  registers, so the `@Scheduled` wiring is real — it simply never fires inside a suite run.
+- **`quarkus.scheduler.enabled=false`.** Nothing may sweep behind a test's back: every outbox
+  assertion drives `OutboxSweeper#sweep` by hand against a clock it moved, every catch-up assertion
+  drives `CatchupSweeper#catchUp` against a log it is still seeding, and a background tick landing in
+  the middle makes both non-deterministic. The jobs are still discovered at build time, so the
+  `@Scheduled` wiring is real — it simply never fires inside a suite run.
+- **`qits.eventstream.catchup-at-startup=false`.** The other half of the same rule, and it needs its
+  own key because the startup sweep is a `StartupEvent` observer rather than a scheduled job. Without
+  it a virtual thread would be reading the stub's log while a test arranges it.
 - **The redial backoffs, shrunk to milliseconds.** The SHAPE is what is under test (a drop is
   followed by a new connection carrying a fresh subscribe frame), not the duration, and the shipped
   values are in the jar's own properties where they belong.
@@ -273,15 +322,29 @@ outrank it with no alternative, no priority and no profile. Everything time-depe
 arithmetic on instants, and the only way to test that without sleeping through it is to move the
 clock.
 
-`StubEventsServer` is the far end: a JDK `HttpServer` for the PUT and a `websockets-next` endpoint
-for the stream, with scripted responses and recorded requests. It is what makes the clone-alone rule
-survivable, and it is the thing to extend when a test needs the server to behave a new way — not a
-mock of `EventsPublisher`, which would stop the wire being under test.
+`StubEventsServer` is the far end: a Vert.x server answering the PUT, the list route and the
+websocket upgrade, with scripted responses and recorded requests. It is what makes the clone-alone
+rule survivable, and it is the thing to extend when a test needs the server to behave a new way — not
+a mock of `EventsPublisher`, which would stop the wire being under test.
+
+**Its list route is the one place the stub decides anything, and that is deliberate.** A paging loop
+can only be tested against something that pages: the properties under test are a cursor that neither
+drops nor repeats a row across a boundary, and a `nextCursor` that is null on the last page *even
+when the page came back full*. A canned answer cannot exhibit either. Everything else about the stub
+stays dumb.
 
 ## Not yet here
 
 - **No CI pipeline.** There is no maven registry on the platform, so a `.config/qits/` recipe for
   this repo would have nothing to publish to. Consumers vendor or submodule this source; when a
   registry exists, the pipeline mirrors qits-spa-ui-components' publish-if-absent shape.
-- **No catch-up.** The stream is live-only. Reading the log back from qits-events is a feature that
-  will need the frame's `id`, which is why the frame carries one already.
+- **No typed durable seam.** `QitsDurableEventListener` hands over the `EventFrame`, because one of
+  its motivating consumers subscribes to `"*"` from configuration and a `Class<E>` cannot express
+  that. A durable listener that knows its event type deserializes the payload itself with
+  `CanonicalJson.payloadTo`. A typed variant is an addition, not a change, if enough consumers want
+  one.
+- **No dead-letter for a durable handler.** An event a handler keeps throwing on is offered again
+  forever, and the watermark stays behind it — so one poison event stops that listener's catch-up
+  while the live stream carries on. The log says so on every sweep. A bounded attempt count here
+  would be the outbox's give-up bug in the other direction: the safe failure is to keep owing the
+  event, and the loud one is the WARN.
