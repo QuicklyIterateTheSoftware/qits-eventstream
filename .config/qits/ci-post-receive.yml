@@ -4,5 +4,9 @@ steps:
     script: |
       set -eu
       # qits-db-core resolves from the platform registry; the pom's default
-      # names localhost:8081, unreachable from inside a step container.
-      ./mvnw -B -ntp verify -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL"
+      # names localhost:8081, unreachable from inside a step container, and
+      # the derived address needs the exact-id mirror to pass Maven's HTTP
+      # blocker (see .qits-maven-settings.xml).
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL"
