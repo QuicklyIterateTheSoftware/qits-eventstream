@@ -15,5 +15,9 @@ steps:
         echo "qits-eventstream@$version is already published — skipping"
         exit 0
       fi
+      # qits-db-core resolves from the platform registry; the pom's default
+      # names localhost:8081, which inside a step container is the container
+      # itself. Derive the address from the injected env, like every consumer.
       ./mvnw -B -ntp deploy -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
         -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"

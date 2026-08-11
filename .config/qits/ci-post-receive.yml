@@ -3,4 +3,6 @@ steps:
     timeout-seconds: 1800
     script: |
       set -eu
-      ./mvnw -B -ntp verify
+      # qits-db-core resolves from the platform registry; the pom's default
+      # names localhost:8081, unreachable from inside a step container.
+      ./mvnw -B -ntp verify -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL"
