@@ -11,6 +11,13 @@ its reason gets "simplified" by the next person.
 credentials, no prior `mvn install` anywhere, no submodule to initialise. Anything that would break
 that is not a tradeoff to weigh, it is the thing this repo exists to make possible.
 
+**One address is the whole exception**: `qits-db-core` comes from the platform Maven repository
+(`<repositories>` in the pom), because the datasource defaults this jar ships name its
+`PatientPgDriver` and a default naming a class every consumer must have is only a default if the jar
+brings the class along. Runtime scope, never imported by a source file here — which is also how the
+extraction rule below stays true. A clone builds green with that repository reachable, or offline
+once the jar is in `~/.m2`; nothing else may follow it in.
+
 That is why the pom duplicates versions instead of inheriting them, and why the suite stands up its
 own stub qits-events (`StubEventsServer`, a Vert.x server answering the PUT, the list route and the
 websocket upgrade) rather than needing a real one. There are no integration tests and no `skipITs` property: the

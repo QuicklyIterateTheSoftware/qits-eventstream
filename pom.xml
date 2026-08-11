@@ -54,6 +54,16 @@
         <zonky.embedded-postgres.version>2.2.2</zonky.embedded-postgres.version>
         <zonky.postgres-binaries.version>18.4.0</zonky.postgres-binaries.version>
 
+        <!-- PatientPgDriver, which this jar's shipped datasource defaults NAME. That is what makes
+             it a runtime dependency of the library rather than a line in each consumer's pom: a
+             default naming a class every consumer must have is only a default if the jar brings the
+             class along. Published by libs/qits-integrations-quarkus, which is why the
+             <repositories> block below exists — the one dependency here that is neither on Maven
+             Central nor part of the Quarkus platform. A clone still tests green with that
+             repository reachable, or offline once the jar is in ~/.m2. -->
+        <qits.db-core.version>2026.811.152803</qits.db-core.version>
+        <qits.maven.repository.url>http://localhost:8081/artifacts/maven/maven</qits.maven.repository.url>
+
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
         <jandex-plugin.version>3.4.0</jandex-plugin.version>
@@ -91,6 +101,16 @@
         </dependencies>
     </dependencyManagement>
 
+    <repositories>
+        <!-- The platform's own Maven repository, where qits-db-core is published. The id is what a
+             locally cached copy is recorded under, so it has to stay `qits-maven` or an offline
+             build refuses an artifact it already has. -->
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
+
     <dependencies>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -109,6 +129,19 @@
                  filled in. See src/main/resources/META-INF/microprofile-config.properties. -->
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <!-- PatientPgDriver: the datasource defaults this jar ships name it, so every consumer
+                 needs the class on its runtime classpath and gets it here rather than by
+                 remembering a line. RUNTIME scope, not compile, and not optional: nothing in these
+                 sources imports it — config carries the name — and an optional dependency is one
+                 the consumer has to restate, which is the whole thing this avoids. It is also what
+                 keeps the extraction rule true: the class is never named in a source file here.
+                 See the datasource block in src/main/resources/META-INF/microprofile-config.properties. -->
+            <groupId>${project.groupId}</groupId>
+            <artifactId>qits-db-core</artifactId>
+            <version>${qits.db-core.version}</version>
+            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>

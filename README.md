@@ -283,6 +283,20 @@ contract:
     quarkus.datasource.eventstream.username=${QITS_RESOURCE_EVENTSTREAM_USERNAME}
     quarkus.datasource.eventstream.password=${QITS_RESOURCE_EVENTSTREAM_PASSWORD}
 
+**The pool ships the platform's resilience baseline, so a consumer restates nothing** — the patient
+driver, validation at borrow and a 15s acquisition timeout, all at ordinal 100 and all overridable
+at 250 like everything else here:
+
+    quarkus.datasource.eventstream.jdbc.driver=eu.wohlben.qits.db.PatientPgDriver
+    quarkus.datasource.eventstream.jdbc.acquisition-timeout=15S
+    quarkus.datasource.eventstream.jdbc.validate-on-borrow=true
+
+`PatientPgDriver` delegates to `org.postgresql.Driver` and, while the database is not there, keeps
+asking for up to 14s instead of failing at once — under the acquisition timeout, so a caller that
+outlasts it still gets the database's real refusal. It comes with this jar (`qits-db-core`, runtime
+scope), because a default that names a class is only a default if the jar brings the class along.
+The doctrine and the measurements are in the superproject's `docs/project-setup-quinoa-angular.md`.
+
 **Adding this jar to a deployable adds one line to its deployment spec.** The consuming repository
 declares the resource in `.config/qits/deployments.yml` —
 
