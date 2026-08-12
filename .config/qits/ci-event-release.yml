@@ -1,6 +1,14 @@
-event: SCMRelease
+# THE TAG STARTS THIS, NOT THE RELEASE ANNOUNCEMENT. `SCMPublishTag` is the git host's fact that a
+# tag ref landed, so this pipeline runs for a real release AND for a bootstrap replay, which pushes
+# the tags and nothing else. That is the restore path this file exists to serve
+# (bootstrap-replay-plan.md in the wrapper). `artifacts:` is unchanged and still a declaration:
+# qits-ci announces `SoftwareRelease` only where a green run and an `SCMRelease` meet, so a replay
+# republishes silently and a real release announces exactly as before.
+event: SCMPublishTag
 when:
-  - repository: { exact: qits-eventstream }
+  # repoId, not repository: the tag event carries the git host's own coordinate, which is the name
+  # this repository is served under.
+  - repoId: { exact: qits-eventstream }
 artifacts:
   - { type: maven, name: "eu.wohlben.qits:qits-eventstream" }
 steps:
@@ -8,7 +16,13 @@ steps:
     timeout-seconds: 1800
     script: |
       set -eu
-      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      # THE TAG NAME IS THE VERSION. Nothing upstream vets it now that any tag push reaches here,
+      # and it becomes a registry coordinate, so the shape is checked before anything is fetched or
+      # deployed: a CalVer is digits and dots.
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .tagName)
+      case "$version" in
+        ''|*[!0-9.]*) echo "not a CalVer tag: $version" >&2; exit 1 ;;
+      esac
       git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
       git checkout --detach "$version"
       if curl -fsS -o /dev/null "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-eventstream/$version/qits-eventstream-$version.pom"; then
