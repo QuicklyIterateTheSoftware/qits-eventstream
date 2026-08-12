@@ -21,6 +21,16 @@ steps:
       # .qits-maven-settings.xml to get past Maven's HTTP blocker — the same
       # pair every service's image build uses.
       export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
-      ./mvnw -B -ntp -s .qits-maven-settings.xml deploy -DskipTests \
+      # This script is read from main's head, but the checkout above is the
+      # release TAG — which may predate a file the script names. The settings
+      # file arrived 2026-08-11 (2e72f6c); a bootstrap replaying an older tag
+      # measured the miss (attempt 5, phase 46). Guard on presence: a tree old
+      # enough to lack the mirror also predates the qits-db-core dependency
+      # that needs it.
+      settings=""
+      if [ -f .qits-maven-settings.xml ]; then
+        settings="-s .qits-maven-settings.xml"
+      fi
+      ./mvnw -B -ntp $settings deploy -DskipTests \
         -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
         -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"
