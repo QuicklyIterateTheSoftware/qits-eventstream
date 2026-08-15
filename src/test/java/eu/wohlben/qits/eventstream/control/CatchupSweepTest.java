@@ -96,9 +96,46 @@ class CatchupSweepTest extends EventstreamTestSupport {
     seed("old-1", T0);
     seed("old-2", T0.plusSeconds(10));
 
-    assertEquals(0, sweeper.catchUp(), "initialization still handles nothing");
-    assertEquals(2, sweeper.catchUp(), "and the next sweep reads from the beginning");
+    assertEquals(2, sweeper.catchUp(), "initialization and epoch replay are one sweep");
     assertEquals(List.of("old-1", "old-2"), durable.handledIds());
+  }
+
+  /** A projection bootstrap needs an explicit head certificate, not merely a handled count. */
+  @Test
+  void aNamedCatchupCertifiesThatItReachedTheHead() {
+    durable.wants("ThingHappened");
+    durable.replaysFromEpoch();
+    seed("old-1", T0);
+    seed("old-2", T0.plusSeconds(10));
+
+    CatchupResult result = sweeper.catchUp(CONSUMER);
+
+    assertEquals(CatchupResult.Status.REACHED_HEAD, result.status());
+    assertTrue(result.reachedLogHead());
+    assertEquals(2, result.handled());
+  }
+
+  /**
+   * A reset projection must not inherit qits-eventstream's retained watermark or claim ledger.
+   * Rebuild clears both atomically and invokes the handler for the same historic rows again.
+   */
+  @Test
+  void anEpochRebuildForgetsTheRetainedLedgerAndReplaysItInTheSameInvocation() {
+    durable.wants("ThingHappened");
+    durable.replaysFromEpoch();
+    seed("old-1", T0);
+    seed("old-2", T0.plusSeconds(10));
+
+    assertEquals(2, sweeper.catchUp());
+    assertEquals(2, claims(CONSUMER));
+
+    CatchupResult rebuilt = sweeper.rebuildFromEpoch(CONSUMER);
+
+    assertEquals(CatchupResult.Status.REACHED_HEAD, rebuilt.status());
+    assertEquals(2, rebuilt.handled());
+    assertEquals(List.of("old-1", "old-2", "old-1", "old-2"), durable.handledIds());
+    assertEquals(2, claims(CONSUMER), "old claims were replaced by the rebuilt claims");
+    assertEquals("old-2", watermark(CONSUMER).eventId);
   }
 
   /**
@@ -111,7 +148,6 @@ class CatchupSweepTest extends EventstreamTestSupport {
     durable.wants("ThingHappened");
     durable.replaysFromEpoch();
     List<String> seeded = seedMany(250);
-    sweeper.catchUp();
 
     assertEquals(250, sweeper.catchUp());
 
@@ -138,7 +174,6 @@ class CatchupSweepTest extends EventstreamTestSupport {
     durable.wants("ThingHappened");
     durable.replaysFromEpoch();
     List<String> seeded = seedMany(250);
-    sweeper.catchUp();
     durable.failOn(seeded.get(209));
 
     assertEquals(209, sweeper.catchUp(), "the whole first page, then nine of the second, then the throw");
@@ -190,7 +225,6 @@ class CatchupSweepTest extends EventstreamTestSupport {
     durable.replaysFromEpoch();
     seed("old-1", T0.plus(Duration.ofDays(2)));
     seed("old-2", T0.plus(Duration.ofDays(2)).plusSeconds(1));
-    sweeper.catchUp();
 
     assertEquals(2, sweeper.catchUp());
 
@@ -203,7 +237,6 @@ class CatchupSweepTest extends EventstreamTestSupport {
     durable.wants("ThingHappened");
     durable.replaysFromEpoch();
     seed("recent-1", T0);
-    sweeper.catchUp();
 
     assertEquals(1, sweeper.catchUp());
 

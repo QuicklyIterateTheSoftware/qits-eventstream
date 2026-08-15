@@ -23,7 +23,7 @@ config defaults and its own database.
 
 ## The whole public surface
 
-Ten types. Everything else in here is how they are kept.
+Twelve types. Everything else in here is how they are kept.
 
 | | |
 |---|---|
@@ -37,6 +37,8 @@ Ten types. Everything else in here is how they are kept.
 | `CausedRow` | the same cause in a table: an entity whose rows record the event they were written because of. |
 | `CausationStamp` | the JPA entity listener that fills a `CausedRow` at persist. |
 | `@Uncaused` | the written opt-out, read by the qits-arch-rules suite and by nobody at runtime. |
+| `CatchupSweeper` | explicitly catch up or rebuild one durable projection by its consumer id. |
+| `CatchupResult` | whether that named catch-up reached the log head, or why it did not. |
 
 Two `@Provider` filters, `CausationClientFilter` and `CausationServerFilter`, apply the header
 automatically; nobody names them, so they are not in the table.
@@ -153,6 +155,37 @@ Four things follow, and each of them has bitten somebody:
 - **Ordering is yours.** Catch-up delivers late and out of stream order relative to live frames, and
   the library does not reorder. A handler whose effect is last-writer-wins must check the tip before
   acting — deploy only if this build is still the newest green one for its repository and branch.
+
+#### Rebuilding a projection at startup
+
+An ordinary durable consumer retains its watermark and handled-event claims across restarts. That is
+the right answer for an effect that must happen once, but it cannot rebuild a projection whose own
+database was cleared: retained claims would make qits-eventstream skip the historic events that the
+empty projection needs.
+
+A listener whose purpose is a replayable projection returns `true` from `replayFromEpoch()`. Its
+first ordinary sweep writes the epoch watermark **and pages to the current log head in that same
+call**; it does not wait for the next `catchup-interval`. An application that must gate readiness on
+that fact may inject `CatchupSweeper` and call:
+
+```java
+CatchupResult result = catchup.rebuildFromEpoch("platform-edge.deployment-active");
+if (result.reachedLogHead()) {
+  // the projection has processed the complete log snapshot; make routes visible
+}
+```
+
+`rebuildFromEpoch` is allowed only for a listener that opted into `replayFromEpoch()`. It clears
+that consumer's `consumer_watermark` and `consumed_event` claims together, writes the epoch, and
+replays to a page explicitly marked final by qits-events. It also pauses live durable delivery while
+the reset and replay run, so no stream callback can claim a row between them. It intentionally
+re-invokes handlers: reset the projection's own store first, or make its handler an idempotent
+replacement.
+
+For a retained projection, `catchUp("consumer-id")` returns the same `CatchupResult` without
+clearing state. `REACHED_HEAD` is the only success status; `UNAVAILABLE`, `FAILED` and `INCOMPLETE`
+must keep a bootstrap gate closed. The existing count-returning `catchUp()` remains the scheduled
+all-listener API for callers that do not need a readiness certificate.
 
 ### Causation
 

@@ -139,8 +139,12 @@ public interface QitsDurableEventListener {
    * already acted on months ago.
    *
    * <p>Return true only when the whole history is genuinely the point — a projection being built, an
-   * audit sink backfilling. It applies at initialization and never again: once a watermark exists,
-   * this answer is not consulted, so flipping it later replays nothing.
+   * audit sink backfilling. The initialization writes the epoch and immediately pages from it in
+   * the same catch-up invocation; it does not wait for a second scheduled sweep. It applies at
+   * initialization and never again: once a watermark exists, this answer is not consulted, so
+   * flipping it later replays nothing. An intentionally reset projection uses
+   * {@code CatchupSweeper.rebuildFromEpoch(consumerId)}, which clears both its watermark and claim
+   * ledger before making that same replay.
    */
   default boolean replayFromEpoch() {
     return false;
