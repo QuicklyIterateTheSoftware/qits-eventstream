@@ -132,6 +132,8 @@ public class EventStreamSubscriber {
     BasicWebSocketConnector.create()
         .baseUri(base)
         .path(STREAM_PATH)
+        .addHeader("X-Qits-User", "qits-eventstream")
+        .addHeader("X-Qits-Roles", "qits:system")
         // A listener's onEvent is arbitrary application code and is allowed to block; the frame
         // callback therefore must not run on an event loop.
         .executionModel(BasicWebSocketConnector.ExecutionModel.BLOCKING)

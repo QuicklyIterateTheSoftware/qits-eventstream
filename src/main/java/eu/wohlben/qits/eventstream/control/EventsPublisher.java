@@ -135,6 +135,8 @@ public class EventsPublisher {
           HttpRequest.newBuilder(target)
               .timeout(publishTimeout)
               .header("Content-Type", "application/json")
+              .header("X-Qits-User", "qits-eventstream")
+              .header("X-Qits-Roles", "qits:system")
               .PUT(
                   HttpRequest.BodyPublishers.ofString(
                       CanonicalJson.envelope(envelope), StandardCharsets.UTF_8))
