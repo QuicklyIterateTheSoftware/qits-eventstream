@@ -84,6 +84,19 @@ public class ConsumedEvents {
         .executeUpdate();
   }
 
+  /**
+   * Forget every claim for one consumer as part of an explicit replay-from-epoch rebuild.
+   *
+   * <p>Not a cleanup operation. The caller must erase the paired watermark in the <em>same
+   * transaction</em>, then re-offer the complete log; removing claims on their own deliberately
+   * revokes the exactly-once history for this consumer.
+   */
+  public int forget(String listenerId) {
+    return em.createNativeQuery("delete from consumed_event where listener_id = ?1")
+        .setParameter(1, listenerId)
+        .executeUpdate();
+  }
+
   /** Every claim, for every listener. The suite's reset; nothing in the library calls it. */
   public int deleteAll() {
     return em.createNativeQuery("delete from consumed_event").executeUpdate();

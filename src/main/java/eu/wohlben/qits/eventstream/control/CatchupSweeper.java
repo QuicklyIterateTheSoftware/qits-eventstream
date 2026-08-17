@@ -29,9 +29,10 @@ import org.jboss.logging.Logger;
  * <p>Per listener, the loop is short and every line of it is a decision:
  *
  * <ul>
- *   <li><b>No watermark yet?</b> Initialize it at the newest matching event and handle nothing —
- *       consume-from-now. Replaying all of history into a consumer that has never run is never the
- *       default; {@link QitsDurableEventListener#replayFromEpoch()} is the opt-in.
+ *   <li><b>No watermark yet?</b> Initialize it at the newest matching event — consume-from-now.
+ *       Replaying all of history into a consumer that has never run is never the default; a
+ *       {@link QitsDurableEventListener#replayFromEpoch()} listener is the opt-in, and continues
+ *       paging from the epoch in this same invocation.
  *   <li><b>Page ascending from the watermark</b>, and run every row through {@link DurableFunnel} —
  *       the same funnel the live stream uses, so the claim rows dedupe whatever the stream already
  *       delivered.
@@ -47,9 +48,11 @@ import org.jboss.logging.Logger;
  * past everything between the two. The claim row is what stops the sweep from handling it twice when
  * it eventually gets there.
  *
- * <p>{@link #catchUp()} is public and returns what it did, which is how the paging is tested: a
- * suite disables the scheduler and the startup run and drives this by hand, exactly as it does with
- * {@link OutboxSweeper}.
+ * <p>{@link #catchUp()} remains the scheduler-compatible, count-only seam. An application whose
+ * readiness depends on a projection being rebuilt calls {@link #catchUp(String)} instead: its
+ * {@link CatchupResult} distinguishes reaching the head from an unavailable log or unfinished
+ * work. Both entry points are serialized, so an application's bootstrap run and the scheduled
+ * safety net cannot page one watermark concurrently.
  */
 @ApplicationScoped
 public class CatchupSweeper {
@@ -113,80 +116,200 @@ public class CatchupSweeper {
     Thread.ofVirtual().name("eventstream-catchup-startup").start(this::catchUp);
   }
 
-  /** Catch every durable listener up to the head of the log. Returns how many events were handled. */
-  public int catchUp() {
+  /**
+   * Catch every durable listener up to the head of the log. Returns how many events were handled.
+   *
+   * <p>This is the established count-only API. Keep callers that only want the scheduled behavior
+   * on it; a bootstrap gate needs {@link #catchUp(String)}'s stronger outcome.
+   */
+  public synchronized int catchUp() {
     if (!enabled) {
       return 0;
     }
     int handled = 0;
     for (QitsDurableEventListener listener : dispatcher.durableListeners()) {
-      try {
-        handled += catchUp(listener);
-      } catch (EventsQuery.Unavailable unreachable) {
-        // One line per listener per sweep, and the sweep is thirty-secondly: the log being
-        // unreachable is a condition rather than an event, and nothing is lost by it — the
-        // watermark stayed where it was and the next sweep reads the same rows.
-        LOG.warnf("catch-up could not read the log: %s", unreachable.getMessage());
-      } catch (RuntimeException e) {
-        LOG.errorf(e, "catch-up failed for %s", listener.getClass().getName());
-      }
+      handled += catchUp(listener).handled();
     }
     return handled;
   }
 
-  private int catchUp(QitsDurableEventListener listener) {
+  /**
+   * Catch one named durable consumer up to the log head and report whether that actually happened.
+   *
+   * <p>Use the stable {@link QitsDurableEventListener#consumerId()} rather than a bean class name:
+   * it is the same id the watermark belongs to and survives a listener refactoring. The call is
+   * serialized with scheduled and all-consumer sweeps.
+   */
+  public synchronized CatchupResult catchUp(String consumerId) {
+    if (!enabled) {
+      return incomplete(consumerId);
+    }
+    QitsDurableEventListener listener = named(consumerId);
+    return listener == null ? failed(consumerId) : catchUp(listener);
+  }
+
+  /**
+   * Rebuild one projection from the start of qits-events' log.
+   *
+   * <p>This is intentionally narrower than a normal sweep. It is only legal for a listener that
+   * explicitly returns true from {@link QitsDurableEventListener#replayFromEpoch()}; that written
+   * opt-in is what makes clearing its persisted claim and watermark history safe. The two rows are
+   * removed in one transaction, the epoch watermark is written, and this invocation then pages to
+   * the head. No second scheduler tick is needed to make the rebuilt projection usable.
+   *
+   * <p>The operation serializes with all sweeps and takes {@link DurableFunnel}'s exclusive gate,
+   * so a live frame cannot claim an event between the ledger reset and the replay. It deliberately
+   * replays effects, so call it only when the listener's own projection store has been reset or
+   * when its handler is an idempotent replacement.
+   */
+  public synchronized CatchupResult rebuildFromEpoch(String consumerId) {
+    if (!enabled) {
+      return incomplete(consumerId);
+    }
+    QitsDurableEventListener listener = named(consumerId);
+    if (listener == null) {
+      return failed(consumerId);
+    }
+    if (!listener.replayFromEpoch()) {
+      LOG.errorf(
+          "durable consumer %s refused an epoch rebuild: replayFromEpoch() is not enabled",
+          consumerId);
+      return failed(consumerId);
+    }
+    return funnel.exclusively(
+        () -> {
+          try {
+            QuarkusTransaction.requiringNew()
+                .run(
+                    () -> {
+                      consumed.forget(consumerId);
+                      watermarks.forget(consumerId);
+                      watermarks.put(consumerId, Instant.EPOCH, null);
+                    });
+            return catchUp(listener);
+          } catch (RuntimeException e) {
+            LOG.errorf(e, "could not reset durable consumer %s for an epoch rebuild", consumerId);
+            return failed(consumerId);
+          }
+        });
+  }
+
+  private QitsDurableEventListener named(String consumerId) {
+    if (consumerId == null || consumerId.isBlank()) {
+      LOG.error("a named catch-up needs a durable consumerId");
+      return null;
+    }
+    List<QitsDurableEventListener> matches =
+        dispatcher.durableListeners().stream()
+            .filter(listener -> consumerId.equals(listener.consumerId()))
+            .toList();
+    if (matches.size() != 1) {
+      LOG.errorf(
+          "named catch-up for %s found %d durable listeners; exactly one is required",
+          consumerId, matches.size());
+      return null;
+    }
+    return matches.getFirst();
+  }
+
+  private CatchupResult catchUp(QitsDurableEventListener listener) {
     String consumerId = listener.consumerId();
     if (consumerId == null || consumerId.isBlank()) {
       LOG.errorf(
           "durable listener %s has no consumerId; it cannot be caught up",
           listener.getClass().getName());
-      return 0;
+      return failed(consumerId);
     }
     Set<String> names = listener.signatures();
     if (names == null || names.isEmpty()) {
       // Wants nothing, so there is nothing to be behind on — and no watermark is written, which
-      // keeps a listener that has not made its mind up yet out of the tables entirely.
-      return 0;
+      // keeps a listener that has not made its mind up yet out of the tables entirely. It also
+      // cannot certify a projection bootstrap: there is no event vocabulary to prove caught up.
+      return incomplete(consumerId);
     }
 
-    ConsumerWatermark mark = read(consumerId);
-    if (mark == null) {
-      initialize(listener, consumerId, names);
-      return 0;
-    }
+    try {
+      ConsumerWatermark mark = read(consumerId);
+      if (mark == null) {
+        // This writes the replay cursor and intentionally falls through. In particular a
+        // replay-from-epoch listener must not need a second scheduler tick before its projection
+        // exists; the same invocation starts paging from the epoch below.
+        initialize(listener, consumerId, names);
+        mark = read(consumerId);
+      }
 
-    int handled = 0;
-    String cursor = cursorOf(mark);
-    while (true) {
-      EventPage page = events.after(names, cursor, PAGE_SIZE);
-      List<EventFrame> rows = page.events();
-      if (rows == null || rows.isEmpty()) {
-        break;
-      }
-      for (EventFrame frame : rows) {
-        DurableFunnel.Result result = funnel.offer(listener, frame);
-        if (result == DurableFunnel.Result.FAILED) {
-          // The page is not processed, so the watermark does not move. Everything before this row
-          // on this page is claimed and will be skipped next time; this row is owed.
-          LOG.warnf(
-              "catch-up for %s stopped at %s; the watermark stays at %s",
-              consumerId, frame.id(), cursor);
-          return handled;
+      int handled = 0;
+      String cursor = cursorOf(mark);
+      while (true) {
+        EventPage page = events.after(names, cursor, PAGE_SIZE);
+        List<EventFrame> rows = page.events();
+        if (rows == null || rows.isEmpty()) {
+          if (page.nextCursor() != null) {
+            // An empty non-final page cannot establish a position: continuing would have no safe
+            // cursor and accepting it as head would lie to a bootstrap gate.
+            LOG.warnf("catch-up for %s received an empty non-final page", consumerId);
+            return incomplete(consumerId, handled);
+          }
+          prune(consumerId);
+          return reachedHead(consumerId, handled);
         }
-        if (result == DurableFunnel.Result.HANDLED) {
-          handled++;
+        for (EventFrame frame : rows) {
+          DurableFunnel.Result result = funnel.offer(listener, frame);
+          if (result == DurableFunnel.Result.FAILED) {
+            // The page is not processed, so the watermark does not move. Everything before this row
+            // on this page is claimed and will be skipped next time; this row is owed.
+            LOG.warnf(
+                "catch-up for %s stopped at %s; the watermark stays at %s",
+                consumerId, frame.id(), cursor);
+            return failed(consumerId, handled);
+          }
+          if (result == DurableFunnel.Result.HANDLED) {
+            handled++;
+          }
+        }
+        EventFrame last = rows.get(rows.size() - 1);
+        cursor = advance(consumerId, last);
+        if (page.nextCursor() == null) {
+          // The log says this was the last page. A full page is NOT the signal — that is the one
+          // thing a reader of this route must not infer for itself.
+          prune(consumerId);
+          return reachedHead(consumerId, handled);
         }
       }
-      EventFrame last = rows.get(rows.size() - 1);
-      cursor = advance(consumerId, last);
-      if (page.nextCursor() == null) {
-        // The log says this was the last page. A full page is NOT the signal — that is the one
-        // thing a reader of this route must not infer for itself.
-        break;
-      }
+    } catch (EventsQuery.Unavailable unreachable) {
+      // One line per listener per sweep, and the sweep is thirty-secondly: the log being
+      // unreachable is a condition rather than an event, and nothing is lost by it — the
+      // watermark stayed where it was and the next sweep reads the same rows.
+      LOG.warnf("catch-up for %s could not read the log: %s", consumerId, unreachable.getMessage());
+      return unavailable(consumerId);
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "catch-up failed for %s", listener.getClass().getName());
+      return failed(consumerId);
     }
-    prune(consumerId);
-    return handled;
+  }
+
+  private static CatchupResult reachedHead(String consumerId, int handled) {
+    return new CatchupResult(consumerId, CatchupResult.Status.REACHED_HEAD, handled);
+  }
+
+  private static CatchupResult unavailable(String consumerId) {
+    return new CatchupResult(consumerId, CatchupResult.Status.UNAVAILABLE, 0);
+  }
+
+  private static CatchupResult failed(String consumerId) {
+    return failed(consumerId, 0);
+  }
+
+  private static CatchupResult failed(String consumerId, int handled) {
+    return new CatchupResult(consumerId, CatchupResult.Status.FAILED, handled);
+  }
+
+  private static CatchupResult incomplete(String consumerId) {
+    return incomplete(consumerId, 0);
+  }
+
+  private static CatchupResult incomplete(String consumerId, int handled) {
+    return new CatchupResult(consumerId, CatchupResult.Status.INCOMPLETE, handled);
   }
 
   /**

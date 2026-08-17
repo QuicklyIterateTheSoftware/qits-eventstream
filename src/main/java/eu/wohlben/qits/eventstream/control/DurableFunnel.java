@@ -7,6 +7,8 @@ import io.quarkus.narayana.jta.QuarkusTransaction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.time.Clock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Supplier;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
@@ -59,6 +61,13 @@ public class DurableFunnel {
 
   @Inject Clock clock;
 
+  /**
+   * A projection rebuild must clear its own claim ledger before replaying. The write side keeps a
+   * live stream callback from claiming an event between that reset and the replay; ordinary live
+   * and scheduled deliveries share the read side and keep their existing concurrent behavior.
+   */
+  private final ReentrantReadWriteLock deliveryLock = new ReentrantReadWriteLock();
+
   @ConfigProperty(name = "qits.eventstream.enabled")
   boolean enabled;
 
@@ -70,6 +79,30 @@ public class DurableFunnel {
    * Result#FAILED} so the caller can leave the event owed rather than settle it.
    */
   public Result offer(QitsDurableEventListener listener, EventFrame frame) {
+    deliveryLock.readLock().lock();
+    try {
+      return offerLocked(listener, frame);
+    } finally {
+      deliveryLock.readLock().unlock();
+    }
+  }
+
+  /**
+   * Run one explicit rebuild while no live durable delivery can interleave with its ledger reset.
+   *
+   * <p>The lock is reentrant for a write holder taking its read side, so the rebuild's own calls to
+   * {@link #offer(QitsDurableEventListener, EventFrame)} remain the same single funnel.
+   */
+  <T> T exclusively(Supplier<T> work) {
+    deliveryLock.writeLock().lock();
+    try {
+      return work.get();
+    } finally {
+      deliveryLock.writeLock().unlock();
+    }
+  }
+
+  private Result offerLocked(QitsDurableEventListener listener, EventFrame frame) {
     if (!enabled) {
       // Belt and braces: with the module dark nothing dials and nothing sweeps, so there is no
       // caller — but "no tables touched at runtime" is the darkness contract and it is cheaper to

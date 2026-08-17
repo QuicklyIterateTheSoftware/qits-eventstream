@@ -32,4 +32,16 @@ public class ConsumerWatermarkRepository
     mark.eventId = eventId;
     persist(mark);
   }
+
+  /**
+   * Forget this consumer's position so an explicit projection rebuild can begin at the epoch.
+   *
+   * <p>Ordinary catch-up never calls this: a watermark is durable memory. It is paired with
+   * {@link ConsumedEvents#forget(String)} in one transaction by the catch-up sweeper's opt-in
+   * rebuild operation; clearing only one of the two would either skip the historical handlers or
+   * leave their old claims pretending the rebuilt projection had already received them.
+   */
+  public boolean forget(String listenerId) {
+    return deleteById(listenerId);
+  }
 }

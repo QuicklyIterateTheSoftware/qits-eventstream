@@ -138,6 +138,8 @@ public class EventsQuery {
           HttpRequest.newBuilder(target)
               .timeout(READ_TIMEOUT)
               .header("Accept", "application/json")
+              .header("X-Qits-User", "qits-eventstream")
+              .header("X-Qits-Roles", "qits:system")
               .GET()
               .build();
       response = client.send(request, HttpResponse.BodyHandlers.ofString());
