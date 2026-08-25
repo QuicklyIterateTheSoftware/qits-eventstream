@@ -181,7 +181,7 @@ class DurableConsumptionTest extends EventstreamTestSupport {
 
     assertEquals(
         DurableFunnel.Result.SKIPPED,
-        funnel.offer(durable, new EventFrame(null, "ThingHappened", T0, "{}", null, null)));
+        funnel.offer(durable, new EventFrame(null, "ThingHappened", T0, "{}", null, null, null)));
 
     assertEquals(List.of(), durable.handledIds());
   }
@@ -193,13 +193,13 @@ class DurableConsumptionTest extends EventstreamTestSupport {
         T0,
         CanonicalJson.payload(new ThingHappened("shipped", 1, T0)),
         null,
-        null);
+        null, null);
   }
 
   /** The same frame as it arrives on the socket, so the live path is exercised end to end. */
   private static String wire(EventFrame frame) {
     return CanonicalJson.canonicalize(
         new EventFrame(
-            frame.id(), frame.name(), frame.occurredAt(), frame.payload(), null, null));
+            frame.id(), frame.name(), frame.occurredAt(), frame.payload(), null, null, null));
   }
 }

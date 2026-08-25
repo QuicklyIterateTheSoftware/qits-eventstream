@@ -354,17 +354,25 @@ database of its own — the resource variables are a deployment fact and a suite
 The `PUT` body, and — plus the row's id — what comes back out of the stream:
 
 ```json
-{"description":null,"name":"BuildSuccessful","occurredAt":"2026-07-31T12:46:03Z",
- "parentId":"6c3f2b1a-…","payload":"{\"repoId\":\"…\",\"runId\":\"…\"}"}
+{"description":null,"environment":"dev","name":"BuildSuccessful",
+ "occurredAt":"2026-07-31T12:46:03Z","parentId":"6c3f2b1a-…",
+ "payload":"{\"repoId\":\"…\",\"runId\":\"…\"}"}
 ```
 
 `payload` is the event's own fields as a canonical JSON **string** — a string, not a nested object,
 because the server stores and compares it verbatim and never has to parse it. Everything `QitsEvent`
-declares is excluded from it: identity and causation travel in the envelope.
+declares is excluded from it: identity, causation and the environment travel in the envelope.
+
+`environment` is the tier this process publishes from: `qits.environment` — the MicroProfile
+spelling of the `QITS_ENVIRONMENT` the deployer injects into every environment-tier service — or
+the literal `platform` where a deployment injects none, which is the platform plane's own
+definition of itself. Resolved by `QitsEventBus` at the same single point the cause is, stored on
+the outbox row for the same reason the parent is (the server compares it, so a sweep must resend
+what the inline attempt sent), and never a `QitsEvent` method.
 
 **Canonical means the string is a function of the value and of nothing else.** Keys sorted, no
 insignificant whitespace, absent fields omitted rather than written as explicit nulls. qits-events
-compares `name` + `occurredAt` + `payload` + `parentId` byte-for-byte to tell an idempotent replay
+compares `name` + `occurredAt` + `payload` + `parentId` + `environment` byte-for-byte to tell an idempotent replay
 (200) from a reused UUID (400), so two serializations of one event that differ by a space are, to
 the far end, a contradiction. `CanonicalJson` therefore builds its **own** `ObjectMapper` and sets
 every knob explicitly. Read AGENTS.md before touching any of it.

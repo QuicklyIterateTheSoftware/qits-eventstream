@@ -95,7 +95,7 @@ class EventstreamDisabledTest extends EventstreamTestSupport {
       assertEquals(0, StubEventsServer.queries().size(), "and the log is not read");
       assertEquals(
           DurableFunnel.Result.SKIPPED,
-          funnel.offer(durable, new EventFrame("e-1", "ThingHappened", T0, "{}", null, null)),
+          funnel.offer(durable, new EventFrame("e-1", "ThingHappened", T0, "{}", null, null, null)),
           "and an arrival that somehow reached the funnel stores nothing");
       assertEquals(0, claims(TestEvents.DURABLE_CONSUMER_ID));
     } finally {

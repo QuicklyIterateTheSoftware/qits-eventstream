@@ -5,6 +5,7 @@ import eu.wohlben.qits.eventstream.control.EventsPublisher;
 import eu.wohlben.qits.eventstream.control.Outbox;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.util.Optional;
 import java.util.UUID;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -49,6 +50,16 @@ import org.jboss.logging.Logger;
  * an hour later (which is precisely what {@code eventId}'s stability argument forbids), and a fifth
  * accessor would need a fifth {@code @JsonIgnore} in the one place this repo has already been bitten
  * silently. Identity travels in the envelope; so does causation.
+ *
+ * <p><b>And so does the environment.</b> The tier this process runs in is {@code qits.environment} —
+ * the MicroProfile spelling of the {@code QITS_ENVIRONMENT} the deployer injects into every
+ * environment-tier service — and where a deployment injects none the process is, by the platform's
+ * own definition, serving every tier: the fallback is the literal {@code "platform"}. Resolved once
+ * per publish, at the same single point the cause is, so the outbox row stores it and a sweep after
+ * a reconfiguration resends what the inline attempt sent. The property name is spelled literally
+ * here rather than imported from qits-integrations-quarkus' {@code EnvironmentHeader}: the
+ * extraction rule admits no foreign {@code eu.wohlben.qits.*} import, so the string is the shared
+ * contract — grep both repos on a rename.
  */
 @ApplicationScoped
 public class QitsEventBus {
@@ -61,6 +72,14 @@ public class QitsEventBus {
 
   @ConfigProperty(name = "qits.eventstream.enabled")
   boolean enabled;
+
+  /**
+   * The tier this process runs in — absent where the deployer injected no {@code QITS_ENVIRONMENT},
+   * which is the platform plane's spelling of "every tier". See the class javadoc; the fallback to
+   * {@code "platform"} is applied at the stamping point, not here, so the raw config stays legible.
+   */
+  @ConfigProperty(name = "qits.environment")
+  Optional<String> environment;
 
   /**
    * Announce that something happened. Returns as soon as the event is either delivered or owned.
@@ -102,7 +121,7 @@ public class QitsEventBus {
     String eventId = event.eventId().toString();
     try {
       UUID parent = parentEventId != null ? parentEventId : CausationScope.current();
-      EventEnvelope envelope = EventEnvelope.of(event, parent);
+      EventEnvelope envelope = EventEnvelope.of(event, parent, environment.orElse("platform"));
       EventsPublisher.Delivery attempt = publisher.put(eventId, envelope);
       if (attempt.delivered()) {
         return;

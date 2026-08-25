@@ -61,10 +61,11 @@ public class Outbox {
               row.occurredAt = envelope.occurredAt();
               row.payload = envelope.payload();
               row.description = envelope.description();
-              // The envelope is stored WHOLE, and the parent is part of it: it participates in
-              // qits-events' idempotency comparison, so a retry that lost it would contradict the
-              // attempt it is retrying.
+              // The envelope is stored WHOLE, and the parent and the tier are part of it: both
+              // participate in qits-events' idempotency comparison, so a retry that lost either
+              // would contradict the attempt it is retrying.
               row.parentId = envelope.parentId();
+              row.environment = envelope.environment();
               row.attempts = 1;
               apply(row, attempt);
               rows.persist(row);

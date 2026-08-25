@@ -65,7 +65,9 @@ class OutboxFlowTest extends EventstreamTestSupport {
 
     StubEventsServer.Put put = StubEventsServer.puts().get(0);
     assertEquals(event.eventId().toString(), put.id());
-    assertEquals(CanonicalJson.envelope(EventEnvelope.of(event)), put.body());
+    // "platform" is the bus's tier fallback where no qits.environment is configured — this suite's
+    // arrangement, and a platform-tier deployment's. The configured path is EnvironmentStampingTest.
+    assertEquals(CanonicalJson.envelope(EventEnvelope.of(event, null, "platform")), put.body());
   }
 
   @Test
@@ -146,7 +148,7 @@ class OutboxFlowTest extends EventstreamTestSupport {
     List<StubEventsServer.Put> puts = StubEventsServer.puts();
     assertEquals(5, puts.size());
     String expectedId = event.eventId().toString();
-    String expectedBody = CanonicalJson.envelope(EventEnvelope.of(event));
+    String expectedBody = CanonicalJson.envelope(EventEnvelope.of(event, null, "platform"));
     for (StubEventsServer.Put put : puts) {
       // The stability of the id is what makes the retry a replay rather than a duplicate, and the
       // stability of the body is what makes qits-events answer 200 to it rather than 400.

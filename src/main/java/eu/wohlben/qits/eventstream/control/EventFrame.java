@@ -26,6 +26,11 @@ import java.time.Instant;
  * is the frame's {@code id} rather than this field that {@link EventDispatcher} scopes a listener
  * with — the arriving event is the cause of whatever the listener publishes, and its own parent is
  * the previous hop's business.
+ *
+ * <p>{@code environment} is the tier the event was published from ({@code dev}, {@code platform}),
+ * appended last under the same rule as the parent was, and null when the frame came from an older
+ * qits-events or an event that predates the field. This module attaches no behaviour to it —
+ * dispatch filters by signature, not tier — it is data a listener may read.
  */
 @io.quarkus.runtime.annotations.RegisterForReflection
 public record EventFrame(
@@ -34,4 +39,5 @@ public record EventFrame(
     Instant occurredAt,
     String payload,
     String description,
-    String parentId) {}
+    String parentId,
+    String environment) {}

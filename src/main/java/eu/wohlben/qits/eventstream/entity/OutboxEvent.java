@@ -68,6 +68,18 @@ public class OutboxEvent extends PanacheEntityBase {
   @Column(name = "parent_id", length = 36)
   public String parentId;
 
+  /**
+   * The envelope's {@code environment} — the tier the publish was stamped from, or null for a row
+   * written before the field existed.
+   *
+   * <p>Stored for {@link #parentId}'s exact reason: the tier is configuration at the moment of the
+   * publish, and a process reconfigured — or upgraded — between the inline attempt and the sweep
+   * would rebuild a <em>different</em> request than the one it is retrying. qits-events compares
+   * the field, so that difference is a 400 against the row's own landed first attempt.
+   */
+  @Column(length = 64)
+  public String environment;
+
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 16)
   public OutboxStatus status;
