@@ -123,9 +123,9 @@ class CausationStampingTest extends EventstreamTestSupport {
     assertTrue(root.has("parentId"), "the key is always present: " + root);
     assertTrue(root.get("parentId").isNull(), "and it is an explicit null, like description");
     assertEquals(
-        List.of("description", "name", "occurredAt", "parentId", "payload"),
+        List.of("description", "environment", "name", "occurredAt", "parentId", "payload"),
         root.properties().stream().map(Map.Entry::getKey).toList(),
-        "alphabetical, so the new key lands between occurredAt and payload with no ordering rule");
+        "alphabetical, so each new key lands where its name puts it with no ordering rule");
 
     JsonNode caused = CanonicalJson.parse(StubEventsServer.puts().get(1).body());
     assertEquals(SCOPE_CAUSE.toString(), caused.get("parentId").asText());
@@ -304,7 +304,7 @@ class CausationStampingTest extends EventstreamTestSupport {
   /** The shape qits-events pushes, with the id a test wants to see stamped on what follows. */
   private static String frame(String id, String name, ThingHappened event) {
     return CanonicalJson.canonicalize(
-        new EventFrame(id, name, event.at(), CanonicalJson.payload(event), null, null));
+        new EventFrame(id, name, event.at(), CanonicalJson.payload(event), null, null, null));
   }
 
   private OutboxEvent rowFor(ThingHappened event) {

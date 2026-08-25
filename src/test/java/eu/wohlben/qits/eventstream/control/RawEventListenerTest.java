@@ -301,7 +301,7 @@ class RawEventListenerTest extends EventstreamTestSupport {
   private static String frame(
       String id, String name, String payload, String description, String parentId) {
     return CanonicalJson.canonicalize(
-        new EventFrame(id, name, T0, payload, description, parentId));
+        new EventFrame(id, name, T0, payload, description, parentId, null));
   }
 
   private static void await(BooleanSupplier condition, String what) {

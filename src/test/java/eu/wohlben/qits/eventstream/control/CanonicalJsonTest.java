@@ -114,15 +114,18 @@ class CanonicalJsonTest {
     String json = CanonicalJson.envelope(envelope);
     JsonNode parsed = CanonicalJson.parse(json);
 
-    // Alphabetical, so parentId lands between occurredAt and payload without anybody choosing where
-    // — the mapper's SORT_PROPERTIES_ALPHABETICALLY is what makes a new envelope field free of an
-    // ordering decision.
+    // Alphabetical, so parentId lands between occurredAt and payload — and environment between
+    // description and name — without anybody choosing where: the mapper's
+    // SORT_PROPERTIES_ALPHABETICALLY is what makes a new envelope field free of an ordering
+    // decision.
     assertEquals(
-        List.of("description", "name", "occurredAt", "parentId", "payload"), fieldNames(parsed));
+        List.of("description", "environment", "name", "occurredAt", "parentId", "payload"),
+        fieldNames(parsed));
     assertTrue(parsed.get("description").isNull(), json);
-    // @JsonInclude(ALWAYS) is on the TYPE, so the new component inherited the exception to the
+    // @JsonInclude(ALWAYS) is on the TYPE, so each new component inherited the exception to the
     // omit-nulls rule: absent means an explicit null on the wire, never a missing key.
     assertTrue(parsed.get("parentId").isNull(), json);
+    assertTrue(parsed.get("environment").isNull(), json);
     assertEquals("ThingHappened", parsed.get("name").asText());
     assertEquals("2026-07-31T12:46:03Z", parsed.get("occurredAt").asText());
     // payload is a STRING holding JSON, not a nested object — the server never parses it.
@@ -151,10 +154,24 @@ class CanonicalJsonTest {
     assertEquals("ThingHappened", frame.name());
     assertEquals(WHEN, frame.occurredAt());
     assertEquals("shipped", CanonicalJson.payloadTo(frame.payload(), ThingHappened.class).what());
-    // The five-field frame an older qits-events pushes: the sixth binds to null rather than failing.
-    // That is the one-directional compatibility clause the feature rests on, and it is why the
-    // rollout order is qits-events first.
+    // The five-field frame an older qits-events pushes: the fields it never sent bind to null
+    // rather than failing. That is the one-directional compatibility clause each appended field
+    // rests on, and it is why the rollout order is qits-events first.
     assertNull(frame.parentId());
+    assertNull(frame.environment());
+  }
+
+  @Test
+  void aFrameCarryingAnEnvironmentReadsItBack() {
+    String text =
+        """
+        {"id":"%s","name":"ThingHappened","occurredAt":"2026-07-31T12:46:03Z",\
+        "payload":"{\\"what\\":\\"shipped\\"}","description":null,"parentId":null,\
+        "environment":"dev"}
+        """
+            .formatted(UUID.randomUUID());
+
+    assertEquals("dev", CanonicalJson.frame(text).environment());
   }
 
   @Test

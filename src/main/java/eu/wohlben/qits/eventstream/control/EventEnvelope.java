@@ -11,8 +11,8 @@ import java.util.UUID;
  * shape that comes back out of {@code /events/stream}. The frozen wire contract:
  *
  * <pre>{@code
- * {"description":null,"name":"BuildSuccessful","occurredAt":"2026-07-31T12:46:03Z",
- *  "parentId":"6c3f2b1a-…","payload":"{…}"}
+ * {"description":null,"environment":"dev","name":"BuildSuccessful",
+ *  "occurredAt":"2026-07-31T12:46:03Z","parentId":"6c3f2b1a-…","payload":"{…}"}
  * }</pre>
  *
  * <p>{@code name} doubles as the signature; {@code payload} is the event's fields as a canonical
@@ -39,35 +39,57 @@ import java.util.UUID;
  * needed no change at all — there is nothing new to hide.
  *
  * <p>It <em>does</em> participate in the server's idempotency comparison ({@code name} + {@code
- * occurredAt} + {@code payload} + {@code parentId}; {@code description} stays outside). That is why
- * the outbox stores the value rather than re-deriving it: a retry rebuilt without the parent would
- * either 400 against its own landed first attempt or land as a root.
+ * occurredAt} + {@code payload} + {@code parentId} + {@code environment}; {@code description} stays
+ * outside). That is why the outbox stores both values rather than re-deriving them: a retry rebuilt
+ * without the parent would either 400 against its own landed first attempt or land as a root, and
+ * one rebuilt under a different tier — a process reconfigured between the attempt and the sweep —
+ * would 400 the same way.
+ *
+ * <p><b>{@code environment} is envelope for the same reason {@code parentId} is.</b> The tier is
+ * process-ambient configuration, not a fact any event class declares, so it enters here — resolved
+ * by {@code QitsEventBus} from {@code qits.environment} — and {@link CanonicalJson} and its mix-in
+ * again needed no change: a payload is byte-identical whatever tier it was published from.
  */
 @JsonInclude(JsonInclude.Include.ALWAYS)
 public record EventEnvelope(
-    String name, Instant occurredAt, String payload, String description, String parentId) {
+    String name,
+    Instant occurredAt,
+    String payload,
+    String description,
+    String parentId,
+    String environment) {
 
   /** The envelope for an event with no cause — the root case, spelled without an argument. */
   public static EventEnvelope of(QitsEvent event) {
     return of(event, null);
   }
 
+  /** {@link #of(QitsEvent, UUID, String)} with no tier — what a test that never configured one builds. */
+  public static EventEnvelope of(QitsEvent event, UUID parentEventId) {
+    return of(event, parentEventId, null);
+  }
+
   /**
-   * The envelope for an event: its name, its time, its canonicalized fields, no description, and
-   * the cause it is being published under. Built in exactly one place on the publishing path, which
-   * is what makes the stamping one method to read and one to test — and what gets the parent into
-   * the outbox row for free, since a row is built from an envelope.
+   * The envelope for an event: its name, its time, its canonicalized fields, no description, the
+   * cause it is being published under and the tier it is published from. Built in exactly one place
+   * on the publishing path, which is what makes the stamping one method to read and one to test —
+   * and what gets the parent and the tier into the outbox row for free, since a row is built from
+   * an envelope.
    *
    * @param parentEventId the resolved cause — the caller's explicit argument or {@link
    *     CausationScope}'s ambient value, already decided by {@code QitsEventBus} — or null for an
    *     event nothing caused
+   * @param environment the resolved tier — {@code qits.environment}, or {@code "platform"} where a
+   *     deployment injects none, already decided by {@code QitsEventBus} — or null from a caller
+   *     that resolves no tier at all
    */
-  public static EventEnvelope of(QitsEvent event, UUID parentEventId) {
+  public static EventEnvelope of(QitsEvent event, UUID parentEventId, String environment) {
     return new EventEnvelope(
         event.name(),
         event.occurredAt(),
         CanonicalJson.payload(event),
         null,
-        parentEventId == null ? null : parentEventId.toString());
+        parentEventId == null ? null : parentEventId.toString(),
+        environment);
   }
 }

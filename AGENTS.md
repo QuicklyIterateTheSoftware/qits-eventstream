@@ -120,7 +120,8 @@ review. Its javadoc argues the widening.
   test, because it is the same lesson the mix-in taught.
 
   **The outbox's `parent_id` column is the load-bearing line of the whole feature.** qits-events
-  compares `name` + `occurredAt` + `payload` + `parentId` — `description` stays outside it — so a
+  compares `name` + `occurredAt` + `payload` + `parentId` + `environment` — `description` stays
+  outside it — so a
   sweeper that rebuilt the envelope without the parent would send a *different* request than the
   attempt it is retrying: a 400 against its own landed first attempt, or a caused event quietly
   republished as a chain root. The parent is fixed when the envelope is built and stored with it,
@@ -326,11 +327,14 @@ other direction (a server that knows the field, a publisher that never sends it)
 compatibility clause, since an absent `parentId` binds to null.
 
 The same clause governs anything added to the envelope later. Add it to the server, deploy, then
-add it here.
+add it here. `environment` — the tier stamped from `qits.environment`, `platform` where none is
+configured — was added under exactly this rule, and its property name is deliberately spelled as a
+literal here rather than imported from qits-integrations-quarkus (the extraction rule): grep both
+repos on a rename.
 
 ## The suite
 
-115 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
+121 tests, all surefire, about fifteen seconds — the extra few are one embedded postgres starting.
 The database is `eventstream_test` on that instance, named for this repository rather than for a
 module so a consumer's suite spawning its own postgres on the same host cannot mean the same one.
 `clean-at-start` wipes the schema between Quarkus restarts, which is what keeps a suite sharing one
@@ -381,9 +385,6 @@ stays dumb.
 
 ## Not yet here
 
-- **No CI pipeline.** There is no maven registry on the platform, so a `.config/qits/` recipe for
-  this repo would have nothing to publish to. Consumers vendor or submodule this source; when a
-  registry exists, the pipeline mirrors qits-spa-ui-components' publish-if-absent shape.
 - **No typed durable seam.** `QitsDurableEventListener` hands over the `EventFrame`, because one of
   its motivating consumers subscribes to `"*"` from configuration and a `Class<E>` cannot express
   that. A durable listener that knows its event type deserializes the payload itself with
