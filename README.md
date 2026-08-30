@@ -1,8 +1,9 @@
-# qits-eventstream
+# qits-eventstream-javalib
 
-The platform's **event bus client**. A service that carries this jar can announce that something
-happened, and can be told when something happened elsewhere. The far end is
-[qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events), which stores the log and
+The platform's **event bus client**, published as the `qits-eventstream` jar. A service that carries
+this jar can announce that something happened, and can be told when something happened elsewhere.
+The far end is
+[qits-events](https://github.com/QuicklyIterateTheSoftware/qits-events-platform-service), which stores the log and
 broadcasts the stream; everything here is the client half of that.
 
 **It enables event STREAMING. It does not do event sourcing.** There is no event store here, no
@@ -267,7 +268,7 @@ An interface plus a listener rather than a mapped superclass, because entities h
 single inheritance already — on `PanacheEntity` or a base of their own.
 
 Nothing here warns about an entity that forgot to participate. That is the qits-arch-rules suite's
-job (in qits-integrations-quarkus): its rules require every `@Entity` to either implement
+job (in qits-integrations-quarkus-javalib): its rules require every `@Entity` to either implement
 `CausedRow` or carry `@Uncaused`, so forgetting fails a build and opting out is one reviewable
 line.
 

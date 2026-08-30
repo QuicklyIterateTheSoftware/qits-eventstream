@@ -1,4 +1,4 @@
-# qits-eventstream — working notes
+# qits-eventstream-javalib — working notes
 
 Read `README.md` first: it defines the public surface, the wire contract and the config surface.
 This file is the working conventions on top of it, and the rules that bite. Every one of them was
@@ -161,7 +161,7 @@ review. Its javadoc argues the widening.
   no `@PreUpdate`, the column is creation history — and the author's own value wins, the same
   precedence as everywhere else. Never a foreign key: the event lives in qits-events' store.
   `Uncaused` is the written opt-out; nothing here enforces completeness — that is qits-arch-rules'
-  job (qits-integrations-quarkus), which matches these types BY NAME, so renaming `CausedRow`,
+  job (qits-integrations-quarkus-javalib), which matches these types BY NAME, so renaming `CausedRow`,
   `CausationStamp` or `Uncaused` breaks that suite's contract and every consumer's build with it.
 
   **No cycle guard and no self-parent repair, here or anywhere on this side.** A guard that catches
@@ -247,8 +247,8 @@ Two translation notes worth keeping:
   *large object*: Hibernate binds an oid and the insert fails against a `text` column. This is the
   only entity mapping the move had to change, and `OutboxFlowTest` asserts the payload round trip,
   so it is proved rather than reasoned.
-- **The `check (status in …)` survives the translation**, where qits-platform-deployments dropped its
-  enum checks. That was a defect answer, not a design one — H2 2.4.240 tied a compiled IN-set to its
+- **The `check (status in …)` survives the translation**, where qits-deployments-platform-service
+  dropped its enum checks. That was a defect answer, not a design one — H2 2.4.240 tied a compiled IN-set to its
   session and failed a valid insert with 23514 — and postgres has no such behaviour. Two values that
   the sweeper's own logic closes over are an invariant, not a catalogue that grows.
 
@@ -290,7 +290,7 @@ Beyond that there are three facts a consumer gets wrong once each.
 - **The reflection registration is the consumer's, and it is the one that fails quietly.** A
   deployable that native-image-compiles must carry a `@RegisterForReflection` naming its own event
   classes, `EventEnvelope`, `EventFrame` **and** `CanonicalJson$QitsEventMixin` (by string name; it
-  is not public). qits-ci's `EventWireReflection` is the worked example.
+  is not public). `EventWireReflection` in qits-ci-service is the worked example.
 
   Without it the binary throws Jackson's `No serializer found for class … you may need to configure
   reflection` on **every** publish — inside `CanonicalJson` and therefore *before* an envelope
@@ -329,8 +329,8 @@ compatibility clause, since an absent `parentId` binds to null.
 The same clause governs anything added to the envelope later. Add it to the server, deploy, then
 add it here. `environment` — the tier stamped from `qits.environment`, `platform` where none is
 configured — was added under exactly this rule, and its property name is deliberately spelled as a
-literal here rather than imported from qits-integrations-quarkus (the extraction rule): grep both
-repos on a rename.
+literal here rather than imported from qits-integrations-quarkus-javalib (the extraction rule): grep
+both repos on a rename.
 
 ## The suite
 
