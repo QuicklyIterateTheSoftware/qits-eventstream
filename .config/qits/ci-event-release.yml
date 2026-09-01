@@ -49,3 +49,23 @@ steps:
       ./mvnw -B -ntp $settings deploy -DskipTests \
         -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
         -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"
+      # THE SBOM IS THE ARTIFACT'S RESOLVED DEPENDENCY TREE, and it goes up in this step, after the
+      # deploy and before the run goes green. That ordering is the whole rule: qits-ci announces
+      # `SoftwareRelease` only for a green run, so an SBOM published here can never be missing for a
+      # version somebody was told about. A failed PUT fails the release ON PURPOSE — the store being
+      # down is not a reason to announce a version whose bill of materials nobody has.
+      #
+      # The plugin is resolved from the same repositories mvnw already resolves through, so it needs
+      # the same `$settings` mirror and the same repository property the deploy above needed; there
+      # is no second channel and no address spelled here.
+      ./mvnw -B -ntp $settings -DskipTests \
+        org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
+        -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL"
+      # The SBOM store is a sibling path of the maven registry inside the same qits-artifacts
+      # deployment, so its root is DERIVED from the injected one rather than written down — the same
+      # discipline every other address in this file follows.
+      sbom_base="${QITS_MAVEN_REGISTRY_URL%%/artifacts/*}/artifacts/sboms"
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @target/sbom.json \
+        "$sbom_base/maven/eu.wohlben.qits:qits-eventstream/-/$version"
