@@ -139,6 +139,12 @@ public class DurableFunnel {
       return Result.FAILED;
     }
     try {
+      // The attempt, said before the outcome. The two outcome lines below tell HANDLED from
+      // SKIPPED, but a handler that throws retryably logs only errors — during the 2026-09-02
+      // consumer wedge the log showed failures with nothing naming the frame the loop was stuck
+      // on until one read the stack. One debug line ahead of the claim makes a retry loop legible
+      // as a loop: the same frame id, attempting, again.
+      LOG.debugf("durable listener %s claiming %s %s", consumerId, frame.name(), frame.id());
       boolean claimed =
           QuarkusTransaction.requiringNew()
               .call(
